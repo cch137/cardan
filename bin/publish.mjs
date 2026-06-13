@@ -12,13 +12,16 @@
 //   - confirm, then publish (skipping lifecycle scripts since we just ran them)
 //
 // Usage:
-//   node bin/publish.mjs [--dry-run] [--yes] [--tag <tag>] [--otp <code>]
-//                        [--allow-dirty] [--remote <name>] [--branch <name>]
-//                        [--skip-subtree-check]
+//   node bin/publish.mjs [--dry-run] [--yes] [--sync] [--tag <tag>]
+//                        [--otp <code>] [--allow-dirty] [--remote <name>]
+//                        [--branch <name>] [--skip-subtree-check]
 //
 // Flags:
 //   --dry-run            Run every check + `npm publish --dry-run`; never publishes.
 //   --yes, -y            Skip the interactive confirmation prompt.
+//   --sync               Push the cardan subtree to the public mirror as part of
+//                        the release (after all validation passes). Without it,
+//                        an out-of-sync mirror blocks publishing.
 //   --tag <tag>          dist-tag to publish under (default: latest). A non-latest
 //                        tag relaxes the "must be newer than latest" ordering check.
 //   --otp <code>         npm one-time password (2FA). Omit to let npm prompt.
@@ -148,6 +151,7 @@ function parseArgs(argv) {
     tag: "latest",
     otp: null,
     allowDirty: false,
+    sync: false,
     remote: "cardan",
     branch: "main",
     skipSubtreeCheck: false,
@@ -164,6 +168,9 @@ function parseArgs(argv) {
         break;
       case "--allow-dirty":
         opts.allowDirty = true;
+        break;
+      case "--sync":
+        opts.sync = true;
         break;
       case "--skip-subtree-check":
         opts.skipSubtreeCheck = true;
@@ -202,6 +209,7 @@ Usage: node bin/publish.mjs [options]
 Options:
   --dry-run       Run all checks and \`npm publish --dry-run\`; never publishes.
   --yes, -y       Skip the confirmation prompt.
+  --sync          Push the cardan subtree to the public mirror during release.
   --tag <tag>     dist-tag (default: latest). Non-latest relaxes ordering check.
   --otp <code>    npm 2FA one-time password.
   --allow-dirty   Allow uncommitted changes in the package directory.
@@ -300,19 +308,22 @@ const indent = (s) =>
     .join("\n");
 
 /**
- * Verify the public mirror repo is in sync with the cardan subtree.
+ * Resolve whether the public mirror repo is in sync with the cardan subtree.
  *
  * The monorepo is the single source of truth; the public repo is produced
  * solely by `git subtree push --prefix=<pkg> <remote> <branch>`. A subtree
  * split produces synthetic commits whose tree is exactly the prefix subtree,
  * so the public repo's HEAD tree must equal `HEAD:<prefix>` here. Comparing
  * those two tree object ids is exact and far cheaper than re-running split.
+ *
+ * Returns null when skipped, otherwise a state object the caller uses to
+ * decide whether to block, or to push the subtree (with --sync).
  */
-function checkSubtreeSynced(opts) {
-  step("Checking cardan subtree is synced to public repo");
+function resolveSubtreeState(opts) {
+  step("Checking cardan subtree sync state");
   if (opts.skipSubtreeCheck) {
     ok("skipped (--skip-subtree-check)");
-    return;
+    return null;
   }
   const inRepo = capture("git", ["rev-parse", "--is-inside-work-tree"]);
   if (!inRepo.ok) {
@@ -345,25 +356,60 @@ function checkSubtreeSynced(opts) {
     );
   }
 
-  const localTree = capture("git", ["-C", top, "rev-parse", `HEAD:${prefix}`]);
-  if (!localTree.ok) {
+  const localTreeRes = capture("git", ["-C", top, "rev-parse", `HEAD:${prefix}`]);
+  if (!localTreeRes.ok) {
     fail(`could not read subtree at HEAD:${prefix} — commit your changes first`);
   }
-  const remoteTree = capture("git", ["-C", top, "rev-parse", "FETCH_HEAD^{tree}"]);
-  if (!remoteTree.ok) fail("could not read fetched public repo tree");
+  const remoteTreeRes = capture("git", ["-C", top, "rev-parse", "FETCH_HEAD^{tree}"]);
+  if (!remoteTreeRes.ok) fail("could not read fetched public repo tree");
 
-  if (localTree.stdout.trim() === remoteTree.stdout.trim()) {
-    ok(`${opts.remote}/${opts.branch} matches the subtree at HEAD`);
+  const localTree = localTreeRes.stdout.trim();
+  const remoteTree = remoteTreeRes.stdout.trim();
+  const state = {
+    top,
+    prefix,
+    remote: opts.remote,
+    branch: opts.branch,
+    localTree,
+    remoteTree,
+    inSync: localTree === remoteTree,
+  };
+
+  if (state.inSync) ok(`${opts.remote}/${opts.branch} matches the subtree at HEAD`);
+  else console.log(yellow("out of sync"));
+  return state;
+}
+
+/**
+ * Push the cardan subtree to the public mirror (only with --sync, and only
+ * after all validation has passed), then verify the mirror now matches HEAD.
+ */
+function syncSubtree(opts, state) {
+  const { top, prefix, remote, branch, localTree } = state;
+  if (opts.dryRun) {
+    step("Subtree push (dry run)");
+    ok(`would run: git subtree push --prefix=${prefix} ${remote} ${branch}`);
     return;
   }
 
-  const msg =
-    `public repo ${opts.remote}/${opts.branch} is out of sync with the cardan subtree.\n` +
-    `      The monorepo is the source of truth — push the latest subtree first:\n` +
-    `        git subtree push --prefix=${prefix} ${opts.remote} ${opts.branch}\n` +
-    `      then re-run this script.`;
-  if (opts.dryRun) warn(msg);
-  else fail(msg);
+  step("Pushing cardan subtree to public repo");
+  console.log();
+  try {
+    run("git", ["-C", top, "subtree", "push", `--prefix=${prefix}`, remote, branch]);
+  } catch (err) {
+    fail(`git subtree push failed: ${err?.message || err}`);
+  }
+  ok();
+
+  step("Verifying mirror matches HEAD after push");
+  const fetched = capture("git", ["-C", top, "fetch", remote, branch]);
+  if (!fetched.ok) fail("could not re-fetch mirror after push");
+  const remoteTreeRes = capture("git", ["-C", top, "rev-parse", "FETCH_HEAD^{tree}"]);
+  if (!remoteTreeRes.ok) fail("could not read mirror tree after push");
+  if (remoteTreeRes.stdout.trim() !== localTree) {
+    fail("mirror still out of sync after subtree push — investigate manually");
+  }
+  ok(`${remote}/${branch} now matches HEAD:${prefix}`);
 }
 
 /** After build/typecheck, ensure nothing tracked got dirtied (metadata/output). */
@@ -561,12 +607,25 @@ async function main() {
   checkRequiredFiles();
   checkNpmAuth();
   checkGitClean(opts.allowDirty);
-  checkSubtreeSynced(opts);
+  const subtree = resolveSubtreeState(opts);
+  if (subtree && !subtree.inSync && !opts.sync) {
+    const msg =
+      `public repo ${subtree.remote}/${subtree.branch} is out of sync with the cardan subtree.\n` +
+      `      The monorepo is the source of truth — push the latest subtree first:\n` +
+      `        git subtree push --prefix=${subtree.prefix} ${subtree.remote} ${subtree.branch}\n` +
+      `      or re-run with --sync to push it as part of this release.`;
+    if (opts.dryRun) warn(msg);
+    else fail(msg);
+  }
   const { published } = fetchRegistryVersions(pkg.name);
   checkVersion(pkg, published, opts.tag);
   runBuildPipeline();
   checkCleanAfterBuild(opts);
   inspectTarball();
+
+  // Push the validated source to the public mirror before publishing, so we
+  // never mirror code that failed typecheck/test/build.
+  if (opts.sync && subtree && !subtree.inSync) syncSubtree(opts, subtree);
 
   if (warnings.length) {
     console.log("\n" + yellow(`${warnings.length} warning(s):`));
