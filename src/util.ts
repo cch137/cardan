@@ -37,24 +37,36 @@ export function parseToolArgs(json: string, provider: string): unknown {
   }
 }
 
-/** Parses a structured-output response and validates it against the caller schema. */
+/** Parses a structured-output response and validates it against the caller schema.
+ *
+ * Strict json_schema constrains each emitted text part to valid JSON individually,
+ * but a reasoning model may emit several message parts (intermediate drafts then a
+ * final answer). Concatenating them yields multiple objects back-to-back, which is
+ * not parseable as one. So we try the joined text first (the common single-part
+ * case), then fall back to the last individually-parseable part — the final answer. */
 export function parseStructuredOutput(
   content: ContentPart[],
   schema: SchemaInput,
   provider: string,
 ): unknown {
-  const text = partsToText(content);
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (cause) {
-    throw new CardanError("unknown", "structured output is not valid JSON", {
-      provider,
-      cause,
-      raw: text,
-    });
+  const parts = content
+    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+    .map((p) => p.text);
+  const candidates = [partsToText(content), ...parts.slice().reverse()];
+  let cause: unknown;
+  for (const text of candidates) {
+    if (!text.trim()) continue;
+    try {
+      return validateOutput(schema, JSON.parse(text));
+    } catch (err) {
+      cause ??= err;
+    }
   }
-  return validateOutput(schema, value);
+  throw new CardanError("unknown", "structured output is not valid JSON", {
+    provider,
+    cause,
+    raw: partsToText(content),
+  });
 }
 
 /** Normalizes the `webSearch` option to its object form, or undefined when off. */

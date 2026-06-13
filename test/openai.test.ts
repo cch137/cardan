@@ -379,6 +379,42 @@ test("structured output sets text.format and parses JSON", async () => {
   assert.deepEqual(result.output, { name: "Jane" });
 });
 
+test("structured output picks the final part when a reasoning model emits drafts", async () => {
+  // Strict json_schema makes each text part valid JSON on its own, but a
+  // reasoning model can emit several (intermediate drafts, then the answer).
+  // Joining them is unparseable; the last part is the real answer.
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          ...RESPONSE_FIXTURE,
+          output: [
+            {
+              type: "message",
+              id: "msg_1",
+              role: "assistant",
+              content: [{ type: "output_text", text: '{"name":"draft"}' }],
+            },
+            {
+              type: "message",
+              id: "msg_2",
+              role: "assistant",
+              content: [{ type: "output_text", text: '{"name":"Jane"}' }],
+            },
+          ],
+        }),
+    ]),
+  });
+  const schema = { type: "object", properties: { name: { type: "string" } } };
+  const result = await provider.generate({
+    model: "gpt-5.2",
+    messages: [textMessage("user", "extract")],
+    output: { schema },
+  });
+  assert.deepEqual(result.output, { name: "Jane" });
+});
+
 test("refusal content maps to refusal finish reason", async () => {
   const provider = new OpenAIProvider({
     apiKey: "sk-test",
