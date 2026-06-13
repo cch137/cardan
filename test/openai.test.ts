@@ -444,3 +444,81 @@ test("embeddings: request shape, ordering, usage", async () => {
   ]);
   assert.equal(result.usage.input.total, 7);
 });
+
+test("web search: injects web_search tool with filters, context, and location", async () => {
+  const captured: Captured[] = [];
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    webSearch: {
+      allowedDomains: ["example.com"],
+      blockedDomains: ["spam.com"],
+      contextSize: "high",
+      userLocation: { country: "US", city: "SF" },
+    },
+  });
+  assert.deepEqual(captured[0]!.body.tools, [
+    {
+      type: "web_search",
+      filters: { allowed_domains: ["example.com"], blocked_domains: ["spam.com"] },
+      search_context_size: "high",
+      user_location: { type: "approximate", country: "US", city: "SF" },
+    },
+  ]);
+});
+
+test("web search: rejects unsupported models", async () => {
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)]),
+  });
+  await assert.rejects(
+    provider.generate({
+      model: "o3",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+    }),
+    (error: unknown) =>
+      error instanceof CardanError && error.code === "invalid_request",
+  );
+});
+
+test("web search: extracts url_citation annotations", async () => {
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          ...RESPONSE_FIXTURE,
+          output: [
+            { type: "web_search_call", id: "ws_1", action: { type: "search" } },
+            {
+              type: "message",
+              id: "msg_1",
+              role: "assistant",
+              content: [
+                {
+                  type: "output_text",
+                  text: "answer",
+                  annotations: [
+                    { type: "url_citation", url: "https://a.com", title: "A", start_index: 0, end_index: 6 },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+    ]),
+  });
+  const result = await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  assert.deepEqual(result.message.content, [{ type: "text", text: "answer" }]);
+  assert.deepEqual(result.citations, [{ url: "https://a.com", title: "A" }]);
+});

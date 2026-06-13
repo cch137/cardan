@@ -11,7 +11,9 @@ import { parseSse } from "../sse.js";
 import { resolveRetry, withRetry } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
+  addCitations,
   bytesToBase64,
+  normalizeWebSearch,
   parseStructuredOutput,
   parseToolArgs,
 } from "../util.js";
@@ -30,6 +32,8 @@ import {
   type StreamEvent,
   type ThinkingPart,
   type Usage,
+  type WebCitation,
+  type WebSearchOptions,
 } from "../types.js";
 
 export type OpenAIModel =
@@ -70,6 +74,9 @@ export interface OpenAIProviderOptions {
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
 
+/** Models with the built-in web-search tool (gpt-5.x, gpt-4.1, gpt-4o families). */
+const WEB_SEARCH_MODELS = /^gpt-(?:5|4\.1|4o)/;
+
 /** OpenAI has no `max`; it tops out at `xhigh`. */
 const EFFORT_MAP: Record<ReasoningEffort, string> = {
   low: "low",
@@ -91,12 +98,14 @@ interface OpenAIUsage {
   output_tokens_details?: { reasoning_tokens?: number };
 }
 
-interface OpenAIResponseBody {
+export interface OpenAIResponseBody {
   status?: string;
   output?: OpenAIItem[];
   usage?: OpenAIUsage;
   error?: { code?: string; message?: string } | null;
   incomplete_details?: { reason?: string } | null;
+  /** Top-level citation list emitted by some Responses-compatible servers (xAI). */
+  citations?: unknown;
 }
 
 /**
@@ -272,22 +281,37 @@ export class OpenAIProvider implements Provider {
     }
     // note: the Responses API has no stop-sequence parameter
 
+    const tools: Array<Record<string, unknown>> = [];
     if (options.tools?.length) {
-      body.tools = await Promise.all(
-        options.tools.map(async (tool) => ({
-          type: "function",
-          name: tool.name,
-          ...(tool.description ? { description: tool.description } : {}),
-          parameters: tool.parameters
-            ? await toJsonSchema(tool.parameters)
-            : { type: "object", properties: {} },
-          // strict mode restricts schemas to the structured-output subset
-          // (additionalProperties: false, all fields required); off so
-          // arbitrary caller schemas keep working
-          strict: false,
-        })),
+      tools.push(
+        ...(await Promise.all(
+          options.tools.map(async (tool) => ({
+            type: "function",
+            name: tool.name,
+            ...(tool.description ? { description: tool.description } : {}),
+            parameters: tool.parameters
+              ? await toJsonSchema(tool.parameters)
+              : { type: "object", properties: {} },
+            // strict mode restricts schemas to the structured-output subset
+            // (additionalProperties: false, all fields required); off so
+            // arbitrary caller schemas keep working
+            strict: false,
+          })),
+        )),
       );
     }
+    const webSearch = normalizeWebSearch(options.webSearch);
+    if (webSearch) {
+      if (!this.supportsWebSearch(options.model)) {
+        throw new CardanError(
+          "invalid_request",
+          `model "${options.model}" does not support web search`,
+          { provider: this.name },
+        );
+      }
+      tools.push(this.buildWebSearchTool(webSearch));
+    }
+    if (tools.length) body.tools = tools;
     if (options.toolChoice !== undefined) {
       body.tool_choice = convertToolChoice(options.toolChoice);
     }
@@ -329,6 +353,64 @@ export class OpenAIProvider implements Provider {
     return true;
   }
 
+  /** Whether `model` supports the built-in web-search tool. */
+  protected supportsWebSearch(model: string): boolean {
+    return WEB_SEARCH_MODELS.test(model);
+  }
+
+  /** Builds the Responses API `web_search` tool entry from generic options. */
+  protected buildWebSearchTool(
+    options: WebSearchOptions,
+  ): Record<string, unknown> {
+    const tool: Record<string, unknown> = { type: "web_search" };
+    if (options.allowedDomains?.length || options.blockedDomains?.length) {
+      tool.filters = {
+        ...(options.allowedDomains?.length
+          ? { allowed_domains: options.allowedDomains }
+          : {}),
+        ...(options.blockedDomains?.length
+          ? { blocked_domains: options.blockedDomains }
+          : {}),
+      };
+    }
+    if (options.contextSize) tool.search_context_size = options.contextSize;
+    if (options.userLocation) {
+      const loc = options.userLocation;
+      tool.user_location = {
+        type: "approximate",
+        ...(loc.country ? { country: loc.country } : {}),
+        ...(loc.city ? { city: loc.city } : {}),
+        ...(loc.region ? { region: loc.region } : {}),
+        ...(loc.timezone ? { timezone: loc.timezone } : {}),
+      };
+    }
+    return tool;
+  }
+
+  /** Extracts web-search citations from a finished response. */
+  protected extractCitations(raw: OpenAIResponseBody): WebCitation[] {
+    const citations: WebCitation[] = [];
+    for (const item of raw.output ?? []) {
+      if (item.type !== "message" || !Array.isArray(item.content)) continue;
+      for (const block of item.content as OpenAIItem[]) {
+        const annotations = Array.isArray(block.annotations)
+          ? (block.annotations as Array<Record<string, unknown>>)
+          : [];
+        for (const annotation of annotations) {
+          if (annotation.type === "url_citation" && annotation.url) {
+            addCitations(citations, [
+              {
+                url: String(annotation.url),
+                ...(annotation.title ? { title: String(annotation.title) } : {}),
+              },
+            ]);
+          }
+        }
+      }
+    }
+    return citations;
+  }
+
   /** Returning undefined omits the `reasoning` field from the request. */
   protected convertReasoning(
     reasoning: NonNullable<GenerateOptions["reasoning"]>,
@@ -364,6 +446,8 @@ export class OpenAIProvider implements Provider {
       usage: mapUsage(raw.usage),
       raw,
     };
+    const citations = this.extractCitations(raw);
+    if (citations.length) result.citations = citations;
     if (options.output && result.finishReason !== "refusal") {
       result.output = parseStructuredOutput(
         content,
@@ -421,10 +505,12 @@ export class OpenAIProvider implements Provider {
         case "response.completed":
         case "response.incomplete": {
           const response = (event.response ?? {}) as OpenAIResponseBody;
+          const citations = this.extractCitations(response);
           yield {
             type: "finish",
             reason: deriveFinishReason(response),
             usage: mapUsage(response.usage),
+            ...(citations.length ? { citations } : {}),
           };
           return;
         }

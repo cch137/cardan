@@ -131,7 +131,13 @@ export type StreamEvent =
   | { type: "thinking_signature"; signature: string; id?: string }
   /** Emitted once per tool call, when its arguments are complete. */
   | { type: "tool_call"; id: string; name: string; args: unknown; signature?: string }
-  | { type: "finish"; reason: FinishReason; usage: Usage };
+  | {
+      type: "finish";
+      reason: FinishReason;
+      usage: Usage;
+      /** Web-search sources gathered this turn, if web search ran. */
+      citations?: WebCitation[];
+    };
 
 export interface Tool {
   name: string;
@@ -141,6 +147,44 @@ export interface Tool {
 }
 
 export type ToolChoice = "auto" | "none" | "required" | { name: string };
+
+/**
+ * Built-in web-search controls. Web search is a *server-side* tool: the
+ * provider runs the searches and returns a finished answer with citations, so
+ * it never round-trips through the caller like a normal `Tool`. Each adapter
+ * routes this to its own native mechanism (Anthropic/OpenAI/xAI server tools,
+ * Gemini grounding, Groq built-in tools) and maps only the fields it supports,
+ * silently ignoring the rest; provider-specific knobs go through
+ * `providerOptions`. Requesting web search on a model that cannot do it raises
+ * `invalid_request`.
+ */
+export interface WebSearchOptions {
+  /** Cap on searches per turn. Anthropic only; others ignore. */
+  maxUses?: number;
+  /** Restrict results to these domains (no scheme). Anthropic/OpenAI/xAI (xAI ≤5). */
+  allowedDomains?: string[];
+  /** Exclude these domains (no scheme). Anthropic/OpenAI/xAI (xAI ≤5). */
+  blockedDomains?: string[];
+  /** Approximate user location to localize results. Anthropic/OpenAI. */
+  userLocation?: {
+    /** Two-letter ISO country code (e.g. `US`). */
+    country?: string;
+    city?: string;
+    region?: string;
+    /** IANA timezone (e.g. `America/New_York`). */
+    timezone?: string;
+  };
+  /** How much search context to feed the model. OpenAI only; others ignore. */
+  contextSize?: "low" | "medium" | "high";
+}
+
+/** A web source the model cited. The lowest common denominator across providers. */
+export interface WebCitation {
+  url: string;
+  title?: string;
+  /** The quoted span the citation backs, when the provider exposes one. */
+  snippet?: string;
+}
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -165,6 +209,12 @@ export interface GenerateOptions {
   messages: Message[];
   tools?: Tool[];
   toolChoice?: ToolChoice;
+  /**
+   * Enable the provider's built-in web search. `true` uses defaults; pass a
+   * {@link WebSearchOptions} object to tune it. Server-side — the provider
+   * runs the searches and returns citations on the result.
+   */
+  webSearch?: boolean | WebSearchOptions;
   /** Structured output: constrain the response to a JSON schema. */
   output?: { schema: SchemaInput };
   maxOutputTokens?: number;
@@ -195,6 +245,8 @@ export interface GenerateResult {
   usage: Usage;
   /** Parsed (and zod-validated, if applicable) structured output. */
   output?: unknown;
+  /** Web-search sources the model cited, if web search ran. */
+  citations?: WebCitation[];
   /** Raw provider response body, for debugging/forward-compat. */
   raw: unknown;
 }

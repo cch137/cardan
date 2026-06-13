@@ -311,6 +311,186 @@ test("stream error events raise CardanError", async () => {
   );
 });
 
+test("web search: injects server tool with mapped options", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+    webSearch: {
+      maxUses: 3,
+      allowedDomains: ["example.com"],
+      userLocation: { country: "US", city: "SF" },
+    },
+  });
+  assert.deepEqual(captured[0]!.body.tools, [
+    {
+      type: "web_search_20250305",
+      name: "web_search",
+      max_uses: 3,
+      allowed_domains: ["example.com"],
+      user_location: { type: "approximate", city: "SF", country: "US" },
+    },
+  ]);
+});
+
+test("web search: rejects models without the tool", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)]),
+  });
+  await assert.rejects(
+    provider.generate({
+      model: "claude-3-haiku-20240307",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+    }),
+    (error: unknown) =>
+      error instanceof CardanError && error.code === "invalid_request",
+  );
+});
+
+test("web search: extracts citations from results and text blocks", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          ...RESPONSE_FIXTURE,
+          content: [
+            { type: "server_tool_use", id: "s1", name: "web_search", input: { query: "x" } },
+            {
+              type: "web_search_tool_result",
+              tool_use_id: "s1",
+              content: [{ type: "web_search_result", url: "https://a.com", title: "A" }],
+            },
+            {
+              type: "text",
+              text: "answer",
+              citations: [
+                {
+                  type: "web_search_result_location",
+                  url: "https://a.com",
+                  title: "A",
+                  cited_text: "snippet",
+                },
+              ],
+            },
+          ],
+          usage: { input_tokens: 10, output_tokens: 5, server_tool_use: { web_search_requests: 2 } },
+        }),
+    ]),
+  });
+  const result = await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  // server_tool_use / web_search_tool_result blocks drop out of content
+  assert.deepEqual(result.message.content, [{ type: "text", text: "answer" }]);
+  // result + text citation merge into one entry with the richest fields
+  assert.deepEqual(result.citations, [
+    { url: "https://a.com", title: "A", snippet: "snippet" },
+  ]);
+  assert.equal(result.usage.output.details.web_search_requests, 2);
+});
+
+test("web search: resumes transparently on pause_turn", async () => {
+  const captured: Captured[] = [];
+  const firstContent = [
+    { type: "server_tool_use", id: "s1", name: "web_search", input: { q: "a" } },
+    {
+      type: "web_search_tool_result",
+      tool_use_id: "s1",
+      content: [{ type: "web_search_result", url: "https://a.com", title: "A" }],
+    },
+  ];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch(
+      [
+        () =>
+          jsonResponse({
+            ...RESPONSE_FIXTURE,
+            content: firstContent,
+            stop_reason: "pause_turn",
+            usage: { input_tokens: 10, output_tokens: 5 },
+          }),
+        () =>
+          jsonResponse({
+            ...RESPONSE_FIXTURE,
+            content: [{ type: "text", text: "final" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 20, output_tokens: 8 },
+          }),
+      ],
+      captured,
+    ),
+  });
+  const result = await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  assert.equal(captured.length, 2);
+  // the paused assistant turn is replayed verbatim to resume
+  const resumed = captured[1]!.body.messages as Array<{ role: string; content: unknown }>;
+  assert.deepEqual(resumed[resumed.length - 1], { role: "assistant", content: firstContent });
+  assert.deepEqual(result.message.content, [{ type: "text", text: "final" }]);
+  assert.equal(result.finishReason, "stop");
+  assert.deepEqual(result.citations, [{ url: "https://a.com", title: "A" }]);
+  // usage sums across the separately-billed requests
+  assert.equal(result.usage.input.total, 30);
+  assert.equal(result.usage.output.total, 13);
+});
+
+test("web search: stream surfaces citations and resumes on pause_turn", async () => {
+  const pauseStream = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"web_search_tool_result","tool_use_id":"s1","content":[{"type":"web_search_result","url":"https://a.com","title":"A"}]}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":4}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join("");
+  const finalStream = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":20,"output_tokens":1}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"final"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join("");
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch(
+      [
+        () => new Response(pauseStream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+        () => new Response(finalStream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+      ],
+      captured,
+    ),
+  });
+  const result = await collectStream(
+    provider.stream({
+      model: "claude-opus-4-8",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+    }),
+  );
+  assert.equal(captured.length, 2);
+  const resumed = captured[1]!.body.messages as Array<{ role: string; content: unknown[] }>;
+  assert.equal((resumed[resumed.length - 1]!.content[0] as { type: string }).type, "web_search_tool_result");
+  assert.deepEqual(result.message.content, [{ type: "text", text: "final" }]);
+  assert.equal(result.finishReason, "stop");
+  assert.deepEqual(result.citations, [{ url: "https://a.com", title: "A" }]);
+  assert.equal(result.usage.input.total, 30);
+  assert.equal(result.usage.output.total, 10);
+});
+
 test("structured output parses and surfaces JSON", async () => {
   const provider = new AnthropicProvider({
     apiKey: "sk-test",

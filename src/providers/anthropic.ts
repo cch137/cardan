@@ -11,7 +11,9 @@ import { parseSse } from "../sse.js";
 import { resolveRetry, withRetry } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
+  addCitations,
   bytesToBase64,
+  normalizeWebSearch,
   parseStructuredOutput,
   parseToolArgs,
 } from "../util.js";
@@ -26,6 +28,8 @@ import {
   type RetryOptions,
   type StreamEvent,
   type Usage,
+  type WebCitation,
+  type WebSearchOptions,
 } from "../types.js";
 
 export type AnthropicModel =
@@ -64,6 +68,20 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 16000;
  */
 const NO_SAMPLING_PARAMS = /^claude-(fable|mythos)-5|^claude-opus-4-(7|8)/;
 
+/** GA server-side web-search tool. Same result/citation wire shape as later versions. */
+const WEB_SEARCH_TOOL_VERSION = "web_search_20250305";
+
+/** Models with the server-side web-search tool (Claude 4+ / fable / mythos). */
+const WEB_SEARCH_MODELS =
+  /^claude-(?:opus|sonnet|haiku)-[4-9]|^claude-(?:fable|mythos)/;
+
+/**
+ * Bound on transparent `pause_turn` resumes. Each paused response already
+ * represents a full server-side tool loop, so this caps total search rounds
+ * generously while preventing an unbounded resume loop.
+ */
+const MAX_SERVER_TOOL_TURNS = 10;
+
 interface AnthropicContentBlock {
   type: string;
   [key: string]: unknown;
@@ -78,6 +96,8 @@ interface AnthropicUsage {
   // thinking is folded into output_tokens); defensively read both spellings
   output_tokens_details?: { thinking_tokens?: number };
   thinking_tokens?: number;
+  // server-side tool invocation counts (billed per request, not in tokens)
+  server_tool_use?: { web_search_requests?: number };
 }
 
 interface AnthropicMessageResponse {
@@ -99,29 +119,96 @@ export class AnthropicProvider implements Provider {
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     const body = await this.buildRequestBody(options, false);
     const retry = resolveRetry(options.retry ?? this.options.retry);
-    const response = await withRetry(
-      () => this.request("/v1/messages", body, options.signal),
-      retry,
-      options.signal,
-    );
-    const raw = (await response.json()) as AnthropicMessageResponse;
-    return this.parseResponse(raw, options);
+    const messages = body.messages as Array<Record<string, unknown>>;
+
+    const content: ContentPart[] = [];
+    const citations: WebCitation[] = [];
+    const usage = emptyUsage();
+    let finishReason: FinishReason = "other";
+    let lastRaw: AnthropicMessageResponse = {};
+
+    // server-side tools (web search) run a sampling loop server-side; when it
+    // hits its iteration cap the response stops with `pause_turn`. Re-send the
+    // assistant turn verbatim to resume, transparently, as one logical turn.
+    for (let turn = 0; turn < MAX_SERVER_TOOL_TURNS; turn++) {
+      const response = await withRetry(
+        () => this.request("/v1/messages", body, options.signal),
+        retry,
+        options.signal,
+      );
+      const raw = (await response.json()) as AnthropicMessageResponse;
+      lastRaw = raw;
+      for (const block of raw.content ?? []) {
+        const part = convertResponseBlock(block);
+        if (part) content.push(part);
+        extractBlockCitations(block, citations);
+      }
+      addUsage(usage, mapUsage(raw.usage));
+      if (raw.stop_reason !== "pause_turn") {
+        finishReason = mapStopReason(raw.stop_reason);
+        break;
+      }
+      messages.push({ role: "assistant", content: raw.content ?? [] });
+    }
+
+    const result: GenerateResult = {
+      message: { role: "assistant", content },
+      finishReason,
+      usage,
+      raw: lastRaw,
+    };
+    if (citations.length) result.citations = citations;
+    if (options.output && finishReason !== "refusal") {
+      result.output = parseStructuredOutput(
+        content,
+        options.output.schema,
+        this.name,
+      );
+    }
+    return result;
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const body = await this.buildRequestBody(options, true);
     const retry = resolveRetry(options.retry ?? this.options.retry);
-    const response = await withRetry(
-      () => this.request("/v1/messages", body, options.signal),
-      retry,
-      options.signal,
-    );
-    if (!response.body) {
-      throw new CardanError("network", "response has no body", {
-        provider: this.name,
-      });
+    const messages = body.messages as Array<Record<string, unknown>>;
+    const usage = emptyUsage();
+    const citations: WebCitation[] = [];
+
+    for (let turn = 0; turn < MAX_SERVER_TOOL_TURNS; turn++) {
+      const response = await withRetry(
+        () => this.request("/v1/messages", body, options.signal),
+        retry,
+        options.signal,
+      );
+      if (!response.body) {
+        throw new CardanError("network", "response has no body", {
+          provider: this.name,
+        });
+      }
+      const { stopReason, rawBlocks } = yield* this.parseStreamTurn(
+        response.body,
+        usage,
+        citations,
+      );
+      if (stopReason !== "pause_turn") {
+        yield {
+          type: "finish",
+          reason: mapStopReason(stopReason),
+          usage,
+          ...(citations.length ? { citations } : {}),
+        };
+        return;
+      }
+      messages.push({ role: "assistant", content: rawBlocks });
     }
-    yield* this.parseStream(response.body);
+    // resume budget exhausted; surface what we have rather than hang
+    yield {
+      type: "finish",
+      reason: "other",
+      usage,
+      ...(citations.length ? { citations } : {}),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -218,17 +305,32 @@ export class AnthropicProvider implements Provider {
       if (options.topP !== undefined) body.top_p = options.topP;
     }
 
+    const tools: Array<Record<string, unknown>> = [];
     if (options.tools?.length) {
-      body.tools = await Promise.all(
-        options.tools.map(async (tool) => ({
-          name: tool.name,
-          ...(tool.description ? { description: tool.description } : {}),
-          input_schema: tool.parameters
-            ? await toJsonSchema(tool.parameters)
-            : { type: "object" },
-        })),
+      tools.push(
+        ...(await Promise.all(
+          options.tools.map(async (tool) => ({
+            name: tool.name,
+            ...(tool.description ? { description: tool.description } : {}),
+            input_schema: tool.parameters
+              ? await toJsonSchema(tool.parameters)
+              : { type: "object" },
+          })),
+        )),
       );
     }
+    const webSearch = normalizeWebSearch(options.webSearch);
+    if (webSearch) {
+      if (!WEB_SEARCH_MODELS.test(options.model)) {
+        throw new CardanError(
+          "invalid_request",
+          `model "${options.model}" does not support web search`,
+          { provider: this.name },
+        );
+      }
+      tools.push(buildWebSearchTool(webSearch));
+    }
+    if (tools.length) body.tools = tools;
     if (options.toolChoice !== undefined) {
       body.tool_choice = convertToolChoice(options.toolChoice);
     }
@@ -255,42 +357,27 @@ export class AnthropicProvider implements Provider {
   // Response
   // -------------------------------------------------------------------------
 
-  private parseResponse(
-    raw: AnthropicMessageResponse,
-    options: GenerateOptions,
-  ): GenerateResult {
-    const content: ContentPart[] = [];
-    for (const block of raw.content ?? []) {
-      const part = convertResponseBlock(block);
-      if (part) content.push(part);
-    }
-    const result: GenerateResult = {
-      message: { role: "assistant", content },
-      finishReason: mapStopReason(raw.stop_reason),
-      usage: mapUsage(raw.usage),
-      raw,
-    };
-    if (options.output && result.finishReason !== "refusal") {
-      result.output = parseStructuredOutput(
-        content,
-        options.output.schema,
-        this.name,
-      );
-    }
-    return result;
-  }
-
-  private async *parseStream(
+  /**
+   * Parses one streamed response. Yields cardan events, accumulates `usage`
+   * and `citations` into the passed cumulative collectors, and returns the
+   * turn's stop reason plus the raw assistant content blocks — the latter so a
+   * `pause_turn` can be resumed by replaying them verbatim. It does *not* emit
+   * the `finish` event; the caller does, once the turn really ends.
+   */
+  private async *parseStreamTurn(
     body: ReadableStream<Uint8Array>,
-  ): AsyncGenerator<StreamEvent> {
-    const usage = emptyUsage();
+    usage: Usage,
+    citations: WebCitation[],
+  ): AsyncGenerator<
+    StreamEvent,
+    { stopReason: string | null; rawBlocks: unknown[] }
+  > {
+    const perTurn = emptyUsage();
+    const rawBlocks: Array<Record<string, unknown>> = [];
     let stopReason: string | null = null;
-    // state for the currently open content block
-    let blockType: string | null = null;
-    let toolId = "";
-    let toolName = "";
-    let toolJson = "";
-    let thinkingSignature = "";
+    // the currently open content block, rebuilt from deltas for verbatim resume
+    let block: Record<string, unknown> | null = null;
+    let jsonBuffer = "";
 
     for await (const { data } of parseSse(body)) {
       let event: Record<string, unknown>;
@@ -302,21 +389,18 @@ export class AnthropicProvider implements Provider {
       switch (event.type) {
         case "message_start": {
           const message = event.message as AnthropicMessageResponse | undefined;
-          mergeUsage(usage, message?.usage);
+          mergeUsage(perTurn, message?.usage);
           break;
         }
         case "content_block_start": {
-          const block = event.content_block as AnthropicContentBlock;
-          blockType = block.type;
-          toolJson = "";
-          thinkingSignature = "";
-          if (block.type === "tool_use") {
-            toolId = String(block.id ?? "");
-            toolName = String(block.name ?? "");
-          } else if (block.type === "redacted_thinking") {
+          const start = event.content_block as AnthropicContentBlock;
+          // clone so deltas mutate our copy, not the parsed event
+          block = { ...start };
+          jsonBuffer = "";
+          if (start.type === "redacted_thinking") {
             yield {
               type: "thinking_signature",
-              signature: String(block.data ?? ""),
+              signature: String(start.data ?? ""),
             };
           }
           break;
@@ -324,36 +408,60 @@ export class AnthropicProvider implements Provider {
         case "content_block_delta": {
           const delta = event.delta as Record<string, unknown>;
           switch (delta.type) {
-            case "text_delta":
-              yield { type: "text_delta", text: String(delta.text ?? "") };
+            case "text_delta": {
+              const text = String(delta.text ?? "");
+              if (block) block.text = String(block.text ?? "") + text;
+              yield { type: "text_delta", text };
               break;
-            case "thinking_delta":
-              yield {
-                type: "thinking_delta",
-                text: String(delta.thinking ?? ""),
-              };
+            }
+            case "thinking_delta": {
+              const text = String(delta.thinking ?? "");
+              if (block) block.thinking = String(block.thinking ?? "") + text;
+              yield { type: "thinking_delta", text };
               break;
+            }
             case "signature_delta":
-              thinkingSignature += String(delta.signature ?? "");
+              if (block) {
+                block.signature =
+                  String(block.signature ?? "") + String(delta.signature ?? "");
+              }
               break;
             case "input_json_delta":
-              toolJson += String(delta.partial_json ?? "");
+              jsonBuffer += String(delta.partial_json ?? "");
               break;
+            case "citations_delta": {
+              const citation = delta.citation as Record<string, unknown> | undefined;
+              if (block && citation) {
+                const list = (block.citations as unknown[]) ?? [];
+                list.push(citation);
+                block.citations = list;
+              }
+              break;
+            }
           }
           break;
         }
         case "content_block_stop": {
-          if (blockType === "tool_use") {
-            yield {
-              type: "tool_call",
-              id: toolId,
-              name: toolName,
-              args: parseToolArgs(toolJson, this.name),
-            };
-          } else if (blockType === "thinking" && thinkingSignature) {
-            yield { type: "thinking_signature", signature: thinkingSignature };
+          if (block) {
+            if (block.type === "tool_use") {
+              block.input = parseToolArgs(jsonBuffer, this.name);
+              yield {
+                type: "tool_call",
+                id: String(block.id ?? ""),
+                name: String(block.name ?? ""),
+                args: block.input,
+              };
+            } else if (block.type === "server_tool_use") {
+              block.input = parseToolArgs(jsonBuffer, this.name);
+            } else if (block.type === "thinking") {
+              const signature = String(block.signature ?? "");
+              if (signature) yield { type: "thinking_signature", signature };
+            }
+            extractBlockCitations(block as AnthropicContentBlock, citations);
+            rawBlocks.push(block);
+            block = null;
+            jsonBuffer = "";
           }
-          blockType = null;
           break;
         }
         case "message_delta": {
@@ -361,12 +469,12 @@ export class AnthropicProvider implements Provider {
             | { stop_reason?: string | null }
             | undefined;
           if (delta?.stop_reason) stopReason = delta.stop_reason;
-          mergeUsage(usage, event.usage as AnthropicUsage | undefined);
+          mergeUsage(perTurn, event.usage as AnthropicUsage | undefined);
           break;
         }
         case "message_stop":
-          yield { type: "finish", reason: mapStopReason(stopReason), usage };
-          return;
+          addUsage(usage, perTurn);
+          return { stopReason, rawBlocks };
         case "error": {
           const error = event.error as
             | { type?: string; message?: string }
@@ -389,6 +497,74 @@ export class AnthropicProvider implements Provider {
 // ---------------------------------------------------------------------------
 // Conversion helpers
 // ---------------------------------------------------------------------------
+
+function buildWebSearchTool(
+  options: WebSearchOptions,
+): Record<string, unknown> {
+  const tool: Record<string, unknown> = {
+    type: WEB_SEARCH_TOOL_VERSION,
+    name: "web_search",
+  };
+  if (options.maxUses !== undefined) tool.max_uses = options.maxUses;
+  if (options.allowedDomains?.length) tool.allowed_domains = options.allowedDomains;
+  if (options.blockedDomains?.length) tool.blocked_domains = options.blockedDomains;
+  if (options.userLocation) {
+    const loc = options.userLocation;
+    tool.user_location = {
+      type: "approximate",
+      ...(loc.city ? { city: loc.city } : {}),
+      ...(loc.region ? { region: loc.region } : {}),
+      ...(loc.country ? { country: loc.country } : {}),
+      ...(loc.timezone ? { timezone: loc.timezone } : {}),
+    };
+  }
+  return tool;
+}
+
+/**
+ * Pulls web-search sources out of a content block: server-tool result blocks
+ * carry the result list, and answer text blocks carry per-claim citations.
+ */
+function extractBlockCitations(
+  block: AnthropicContentBlock,
+  out: WebCitation[],
+): void {
+  if (block.type === "web_search_tool_result") {
+    const items = Array.isArray(block.content) ? block.content : [];
+    for (const item of items as Array<Record<string, unknown>>) {
+      if (item?.type === "web_search_result" && item.url) {
+        addCitations(out, [
+          {
+            url: String(item.url),
+            ...(item.title ? { title: String(item.title) } : {}),
+          },
+        ]);
+      }
+    }
+  } else if (block.type === "text" && Array.isArray(block.citations)) {
+    for (const c of block.citations as Array<Record<string, unknown>>) {
+      if (c?.url) {
+        addCitations(out, [
+          {
+            url: String(c.url),
+            ...(c.title ? { title: String(c.title) } : {}),
+            ...(c.cited_text ? { snippet: String(c.cited_text) } : {}),
+          },
+        ]);
+      }
+    }
+  }
+}
+
+/** Sums one usage tally into another (for `pause_turn` resumes billed separately). */
+function addUsage(target: Usage, add: Usage): void {
+  target.input.total += add.input.total;
+  target.output.total += add.output.total;
+  for (const [key, value] of Object.entries(add.input.details))
+    target.input.details[key] = (target.input.details[key] ?? 0) + value;
+  for (const [key, value] of Object.entries(add.output.details))
+    target.output.details[key] = (target.output.details[key] ?? 0) + value;
+}
 
 function convertMessage(message: Message): Record<string, unknown> {
   // tool results travel in user-role messages on Anthropic
@@ -538,5 +714,9 @@ function mergeUsage(target: Usage, usage: AnthropicUsage | undefined): void {
   const reasoning =
     usage.output_tokens_details?.thinking_tokens ?? usage.thinking_tokens;
   if (reasoning !== undefined) target.output.details.reasoning = reasoning;
+  // web-search count is a billed request tally, not tokens; surfaced for
+  // accounting under a clearly-named key
+  const searches = usage.server_tool_use?.web_search_requests;
+  if (searches) target.output.details.web_search_requests = searches;
 }
 

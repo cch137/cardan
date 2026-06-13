@@ -361,3 +361,19 @@ test("Cardan routes modal/ model ids to the Modal provider", async () => {
   assert.equal(captured[0]!.url, `${BASE_URL}/v1/chat/completions`);
   assert.equal(captured[0]!.body.model, "qwen3-32b");
 });
+
+test("web search: rejected — no built-in web search on Modal", async () => {
+  const provider = new ModalProvider({
+    baseUrl: "https://x--app.modal.run",
+    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)]),
+  });
+  await assert.rejects(
+    provider.generate({
+      model: "my-model",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+    }),
+    (error: unknown) =>
+      error instanceof CardanError && error.code === "invalid_request",
+  );
+});

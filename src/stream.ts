@@ -7,6 +7,7 @@ import {
   type StreamEvent,
   type TextPart,
   type ThinkingPart,
+  type WebCitation,
 } from "./types.js";
 
 /**
@@ -20,6 +21,7 @@ export async function collectStream(
   const content: ContentPart[] = [];
   let finishReason: FinishReason = "other";
   let usage = emptyUsage();
+  let citations: WebCitation[] | undefined;
 
   const last = () => content[content.length - 1];
 
@@ -85,6 +87,7 @@ export async function collectStream(
       case "finish":
         finishReason = event.reason;
         usage = event.usage;
+        if (event.citations?.length) citations = event.citations;
         break;
     }
   }
@@ -93,6 +96,7 @@ export async function collectStream(
     message: { role: "assistant", content },
     finishReason,
     usage,
+    ...(citations ? { citations } : {}),
   };
 }
 

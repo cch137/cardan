@@ -18,7 +18,7 @@
 
 ## Goals
 
-- 統一的 `generate`(含 streaming)介面,涵蓋:多輪訊息、system prompt、tool calling、structured output(JSON Schema)、reasoning/thinking、vision 輸入。
+- 統一的 `generate`(含 streaming)介面,涵蓋:多輪訊息、system prompt、tool calling、structured output(JSON Schema)、reasoning/thinking、vision 輸入、內置 web search。
 - 統一的 usage schema:input/output token 總量 + 細項(cache read/write、reasoning tokens 等),足以支撐成本記帳。
 - 統一的錯誤分類(auth、rate limit、overloaded、context length、invalid request、network),可重試錯誤自動退避重試,尊重 `Retry-After`。
 - 統一的 streaming 事件流(AsyncIterable),事件種類最小化。
@@ -145,3 +145,18 @@ type StreamEvent =
 - Groq structured output:`response_format.json_schema` 的 `strict: true`(constrained decoding)僅 gpt-oss 支援,能力表閘控;其他模型走 best-effort(不帶 strict 旗標,zod schema 仍由 client 端驗證)。不支援 json_schema 的模型(llama-3.x)由 Groq 直接報錯。
 - Groq streaming usage 在 `finish_reason` chunk 上(頂層 `usage` 與 `x_groq.usage` 皆有,免 `stream_options`),終止符 `data: [DONE]`;tool call 以 `index` 聚合,id(`fc_…`)原樣保留。prompt caching 全自動,`prompt_tokens_details.cached_tokens`→`cache_read`。413(request_too_large)映射 `context_length`。
 - Groq 送 `max_completion_tokens`;無 embeddings API,`embed` 直接報 `invalid_request`。
+
+### Web search(內置/server-side 工具)
+
+- **統一入口是 first-class 欄位 `webSearch?: boolean | WebSearchOptions`,不走通用 `tools`**:web search 是 server-side 工具(供應商自己跑搜尋、回傳含引用的成品),不像一般 `Tool` 會 round-trip 回呼叫方,語意完全不同,故獨立成欄位。`WebSearchOptions` 是跨供應商的最小正規化集合(`maxUses`、`allowedDomains`、`blockedDomains`、`userLocation`、`contextSize`);各 adapter 只映射自己支援的欄位、忽略其餘,供應商獨有旗標走 `providerOptions`。
+- **輸出統一為來源清單**:`GenerateResult.citations?: WebCitation[]`(`{url, title?, snippet?}`),streaming 在 `finish` 事件帶 `citations`,`collectStream` 一併收斂。這是五家都能穩定抽取的最小公因數;inline span 映射(OpenAI 字元 index、Gemini segment、Anthropic block citation)差異太大,只保留來源清單,原始細節留在 `raw`。`addCitations` 以 URL 去重,先到者佔位、後到者補滿缺漏的 title/snippet。
+- **不支援即報錯**:在沒有 web search 能力的模型上請求 `webSearch` 一律報 `invalid_request`(各 adapter 以能力表/regex 閘控);需要逃生口時透過 `providerOptions` 直接覆寫請求 body。
+- **各 adapter 路由**:
+  - Anthropic — `tools` 注入 `web_search_20250305` server tool(GA,跨 Claude 4 家族與 fable/mythos 相容);從 `web_search_tool_result` block 與 text block 的 `citations` 抽來源;`server_tool_use`/`web_search_tool_result` block 不進通用 content(留在 `raw`)。
+  - OpenAI — Responses `tools` 注入 `{type:"web_search"}`(filters / `search_context_size` / `user_location`);從 message 的 `url_citation` annotations 抽來源。建構工具、能力判斷、引用抽取都拆成 protected hook 供 xAI 覆寫。
+  - xAI — 繼承 OpenAI 但覆寫 hook:`web_search` 工具的 domain 過濾放 `filters`(allowed/excluded 互斥、各上限 5),無 `search_context_size`/`user_location`;引用除 annotations 外另讀頂層 `response.citations`。(舊的 Live Search `search_parameters` 已於 2026-01-12 退役,唯一路徑是 Responses 工具。)
+  - Gemini — `tools` 追加 `google_search`(Gemini 2.0+)或 `google_search_retrieval`(舊機型);從 `candidate.groundingMetadata.groundingChunks[].web` 抽 uri/title。google_search 無 domain/location 旋鈕,`WebSearchOptions` 對應欄位忽略。
+  - Groq — 能力表分流:reasoning 模型(gpt-oss)宣告內置 `browser_search` 工具(與 structured output 不相容,衝突報 `invalid_request`);compound 系統自動跑搜尋、不宣告工具(`webSearch:true` 等同 no-op)。引用 best-effort 從 `executed_tools[].search_results.results` / message 層 `search_results` 抽取;gpt-oss 的內文 `【n†…】` 標記無結構化 URL,留在 `raw`。
+  - Modal — 自部署端點無內置 web search,`webSearch` 直接報 `invalid_request`。
+- **工具迴圈**:OpenAI、Gemini、xAI、Groq 的搜尋迴圈都在 server 端跑完、單一回應回傳成品,呼叫端不需處理。Anthropic 的 server tool 取樣迴圈達上限時以 `stop_reason: "pause_turn"` 中止——adapter 在 `generate` 與 `stream` 都做**透明、有上限(`MAX_SERVER_TOOL_TURNS`)的續跑**:把上一輪 assistant 回合(generate 用 raw blocks、stream 由 SSE 重建 raw blocks)原樣回送以恢復,合併 content/citations、跨輪累加 usage(各請求分別計費,加總即實際帳),對呼叫端呈現為單一回合。
+- **Usage**:Anthropic 的 `server_tool_use.web_search_requests` 映射到 `usage.output.details.web_search_requests`(這是**計費的請求次數,非 token**,以明確命名標示)。

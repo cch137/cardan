@@ -1,7 +1,7 @@
 import { CardanError } from "./errors.js";
 import { partsToText } from "./normalize.js";
 import { validateOutput, type SchemaInput } from "./schema.js";
-import type { ContentPart } from "./types.js";
+import type { ContentPart, WebCitation, WebSearchOptions } from "./types.js";
 
 // Provider-agnostic helpers shared by the adapters. Pure utilities only — no
 // per-provider wire logic lives here.
@@ -55,6 +55,35 @@ export function parseStructuredOutput(
     });
   }
   return validateOutput(schema, value);
+}
+
+/** Normalizes the `webSearch` option to its object form, or undefined when off. */
+export function normalizeWebSearch(
+  webSearch: boolean | WebSearchOptions | undefined,
+): WebSearchOptions | undefined {
+  if (!webSearch) return undefined;
+  return webSearch === true ? {} : webSearch;
+}
+
+/**
+ * Collects citations into `target`, de-duplicating by URL. The first sighting
+ * of a URL wins its slot; later sightings only fill in a missing title or
+ * snippet, so the richest available metadata survives without duplicates.
+ */
+export function addCitations(
+  target: WebCitation[],
+  citations: Iterable<WebCitation>,
+): void {
+  for (const citation of citations) {
+    if (!citation.url) continue;
+    const existing = target.find((c) => c.url === citation.url);
+    if (existing) {
+      if (!existing.title && citation.title) existing.title = citation.title;
+      if (!existing.snippet && citation.snippet) existing.snippet = citation.snippet;
+    } else {
+      target.push({ ...citation });
+    }
+  }
 }
 
 /** Base64-encodes bytes, chunked to avoid call-stack limits on large inputs. */

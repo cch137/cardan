@@ -304,6 +304,13 @@ export class ModalProvider implements Provider {
     options: GenerateOptions,
     stream: boolean,
   ): Promise<Record<string, unknown>> {
+    if (options.webSearch) {
+      throw new CardanError(
+        "invalid_request",
+        "Modal deployments have no built-in web search",
+        { provider: this.name },
+      );
+    }
     const body: Record<string, unknown> = {
       model: options.model,
       messages: convertMessages(normalizeMessages(options.messages)),

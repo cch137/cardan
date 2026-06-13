@@ -58,6 +58,8 @@ export type {
   ToolChoice,
   ToolResultPart,
   Usage,
+  WebCitation,
+  WebSearchOptions,
 } from "./types.js";
 export { DEFAULT_RETRY, emptyUsage, textMessage } from "./types.js";
 export { CardanError, isCardanError, type ErrorCode } from "./errors.js";

@@ -655,3 +655,54 @@ test("image parts: bytes to inlineData, URL to fileData", async () => {
     },
   ]);
 });
+
+test("web search: appends the google_search grounding tool", async () => {
+  const captured: Captured[] = [];
+  const provider = new GeminiProvider({
+    apiKey: "g-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "gemini-2.5-flash",
+    messages: [textMessage("user", "q")],
+    tools: [{ name: "f", parameters: { type: "object" } }],
+    webSearch: true,
+  });
+  const tools = captured[0]!.body.tools as Array<Record<string, unknown>>;
+  assert.equal(tools.length, 2);
+  assert.ok("functionDeclarations" in tools[0]!);
+  assert.deepEqual(tools[1], { google_search: {} });
+});
+
+test("web search: extracts citations from grounding metadata", async () => {
+  const provider = new GeminiProvider({
+    apiKey: "g-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          candidates: [
+            {
+              content: { role: "model", parts: [{ text: "answer" }] },
+              finishReason: "STOP",
+              groundingMetadata: {
+                groundingChunks: [
+                  { web: { uri: "https://a.com", title: "A" } },
+                  { web: { uri: "https://b.com", title: "B" } },
+                ],
+              },
+            },
+          ],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+        }),
+    ]),
+  });
+  const result = await provider.generate({
+    model: "gemini-2.5-flash",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  assert.deepEqual(result.citations, [
+    { url: "https://a.com", title: "A" },
+    { url: "https://b.com", title: "B" },
+  ]);
+});

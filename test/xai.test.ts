@@ -163,3 +163,94 @@ test("Cardan routes xai/ model ids to the xAI provider", async () => {
   assert.equal(captured[0]!.url, "https://api.x.ai/v1/responses");
   assert.equal(captured[0]!.body.model, "grok-4.3");
 });
+
+test("web search: uses xAI filters shape, allowed capped at five", async () => {
+  const captured: Captured[] = [];
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+    webSearch: {
+      allowedDomains: ["a.com", "b.com", "c.com", "d.com", "e.com", "f.com"],
+      contextSize: "high", // ignored by xAI
+    },
+  });
+  assert.deepEqual(captured[0]!.body.tools, [
+    {
+      type: "web_search",
+      filters: { allowed_domains: ["a.com", "b.com", "c.com", "d.com", "e.com"] },
+    },
+  ]);
+});
+
+test("web search: blocked domains map to excluded_domains", async () => {
+  const captured: Captured[] = [];
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+    webSearch: { blockedDomains: ["spam.com"] },
+  });
+  assert.deepEqual(captured[0]!.body.tools, [
+    { type: "web_search", filters: { excluded_domains: ["spam.com"] } },
+  ]);
+});
+
+test("web search: rejects non-grok-4 models", async () => {
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)]),
+  });
+  await assert.rejects(
+    provider.generate({
+      model: "grok-3",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+    }),
+    (error: unknown) =>
+      error instanceof CardanError && error.code === "invalid_request",
+  );
+});
+
+test("web search: reads both annotations and top-level citations", async () => {
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          ...RESPONSE_FIXTURE,
+          output: [
+            {
+              type: "message",
+              id: "msg_1",
+              role: "assistant",
+              content: [
+                {
+                  type: "output_text",
+                  text: "answer",
+                  annotations: [{ type: "url_citation", url: "https://a.com", title: "A" }],
+                },
+              ],
+            },
+          ],
+          citations: ["https://b.com", { url: "https://c.com", title: "C" }],
+        }),
+    ]),
+  });
+  const result = await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  assert.deepEqual(result.citations, [
+    { url: "https://a.com", title: "A" },
+    { url: "https://b.com" },
+    { url: "https://c.com", title: "C" },
+  ]);
+});

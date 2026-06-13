@@ -11,9 +11,11 @@ import { parseSse } from "../sse.js";
 import { resolveRetry, withRetry } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
+  addCitations,
   base64ToBytes,
   bytesToBase64,
   isSyntheticCallId,
+  normalizeWebSearch,
   parseStructuredOutput,
   syntheticCallId,
 } from "../util.js";
@@ -31,6 +33,7 @@ import {
   type RetryOptions,
   type StreamEvent,
   type Usage,
+  type WebCitation,
 } from "../types.js";
 
 export type GeminiModel =
@@ -64,6 +67,9 @@ const DEFAULT_API_VERSION = "v1beta";
 
 /** Models that take `thinkingLevel` (Gemini 3+); older ones take `thinkingBudget`. */
 const THINKING_LEVEL_MODELS = /^gemini-(?:[3-9]|\d{2})/;
+
+/** Pre-2.0 models use the legacy `google_search_retrieval` grounding tool. */
+const SEARCH_RETRIEVAL_MODELS = /^gemini-1\./;
 
 const THINKING_LEVEL: Record<ReasoningEffort, string> = {
   low: "low",
@@ -99,9 +105,14 @@ interface GeminiUsageMetadata {
   cachedContentTokenCount?: number;
 }
 
+interface GeminiGroundingMetadata {
+  groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+}
+
 interface GeminiCandidate {
   content?: { role?: string; parts?: GeminiPart[] };
   finishReason?: string;
+  groundingMetadata?: GeminiGroundingMetadata;
 }
 
 interface GeminiResponse {
@@ -286,21 +297,38 @@ export class GeminiProvider implements Provider {
     };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
 
+    const tools: Array<Record<string, unknown>> = [];
     if (options.tools?.length) {
-      body.tools = [
-        {
-          functionDeclarations: await Promise.all(
-            options.tools.map(async (tool) => ({
-              name: tool.name,
-              ...(tool.description ? { description: tool.description } : {}),
-              ...(tool.parameters
-                ? { parametersJsonSchema: await toJsonSchema(tool.parameters) }
-                : {}),
-            })),
-          ),
-        },
-      ];
+      tools.push({
+        functionDeclarations: await Promise.all(
+          options.tools.map(async (tool) => ({
+            name: tool.name,
+            ...(tool.description ? { description: tool.description } : {}),
+            ...(tool.parameters
+              ? { parametersJsonSchema: await toJsonSchema(tool.parameters) }
+              : {}),
+          })),
+        ),
+      });
     }
+    // Grounding with Google Search; the tool has no domain/location knobs, so
+    // WebSearchOptions fields are ignored (use providerOptions for raw control)
+    if (normalizeWebSearch(options.webSearch)) {
+      const model = stripModelsPrefix(options.model);
+      if (!model.startsWith("gemini-")) {
+        throw new CardanError(
+          "invalid_request",
+          `model "${options.model}" does not support web search`,
+          { provider: this.name },
+        );
+      }
+      tools.push(
+        SEARCH_RETRIEVAL_MODELS.test(model)
+          ? { google_search_retrieval: {} }
+          : { google_search: {} },
+      );
+    }
+    if (tools.length) body.tools = tools;
     if (options.toolChoice !== undefined) {
       body.toolConfig = {
         functionCallingConfig: convertToolChoice(options.toolChoice),
@@ -358,6 +386,9 @@ export class GeminiProvider implements Provider {
       usage: mapUsage(raw.usageMetadata),
       raw,
     };
+    const citations: WebCitation[] = [];
+    extractGroundingCitations(candidate?.groundingMetadata, citations);
+    if (citations.length) result.citations = citations;
     if (options.output && result.finishReason !== "refusal") {
       result.output = parseStructuredOutput(
         content,
@@ -375,6 +406,7 @@ export class GeminiProvider implements Provider {
     let finishReason: string | undefined;
     let hasToolCall = false;
     let blocked = false;
+    const citations: WebCitation[] = [];
 
     for await (const { data } of parseSse(body)) {
       let chunk: GeminiResponse & { error?: { message?: string } };
@@ -425,6 +457,9 @@ export class GeminiProvider implements Provider {
           }
         }
       }
+      if (candidate?.groundingMetadata) {
+        extractGroundingCitations(candidate.groundingMetadata, citations);
+      }
       if (candidate?.finishReason) finishReason = candidate.finishReason;
     }
 
@@ -438,6 +473,7 @@ export class GeminiProvider implements Provider {
       type: "finish",
       reason: blocked ? "refusal" : mapFinishReason(finishReason, hasToolCall),
       usage,
+      ...(citations.length ? { citations } : {}),
     };
   }
 }
@@ -448,6 +484,24 @@ export class GeminiProvider implements Provider {
 
 function stripModelsPrefix(model: string): string {
   return model.startsWith("models/") ? model.slice("models/".length) : model;
+}
+
+/** Pulls cited web sources out of Gemini grounding metadata. */
+function extractGroundingCitations(
+  metadata: GeminiGroundingMetadata | undefined,
+  out: WebCitation[],
+): void {
+  for (const chunk of metadata?.groundingChunks ?? []) {
+    const web = chunk.web;
+    if (web?.uri) {
+      addCitations(out, [
+        {
+          url: String(web.uri),
+          ...(web.title ? { title: String(web.title) } : {}),
+        },
+      ]);
+    }
+  }
 }
 
 /** Maps call id → tool name, so functionResponse parts can carry `name`. */

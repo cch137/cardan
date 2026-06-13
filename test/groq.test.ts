@@ -403,3 +403,95 @@ test("Cardan routes groq/ ids, keeping slashes in the model name", async () => {
   assert.equal(captured[0]!.url, "https://api.groq.com/openai/v1/chat/completions");
   assert.equal(captured[0]!.body.model, "openai/gpt-oss-120b");
 });
+
+test("web search: gpt-oss declares the browser_search tool", async () => {
+  const captured: Captured[] = [];
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "openai/gpt-oss-120b",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  assert.deepEqual(captured[0]!.body.tools, [{ type: "browser_search" }]);
+});
+
+test("web search: browser_search is incompatible with structured output", async () => {
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)]),
+  });
+  await assert.rejects(
+    provider.generate({
+      model: "openai/gpt-oss-120b",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+      output: { schema: { type: "object" } },
+    }),
+    (error: unknown) =>
+      error instanceof CardanError && error.code === "invalid_request",
+  );
+});
+
+test("web search: compound systems declare no tool and extract citations", async () => {
+  const captured: Captured[] = [];
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch(
+      [
+        () =>
+          jsonResponse({
+            ...CHAT_FIXTURE,
+            model: "groq/compound",
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: "assistant",
+                  content: "answer",
+                  executed_tools: [
+                    {
+                      type: "web_search",
+                      search_results: {
+                        results: [{ url: "https://a.com", title: "A", content: "snippet" }],
+                      },
+                    },
+                  ],
+                },
+                finish_reason: "stop",
+              },
+            ],
+          }),
+      ],
+      captured,
+    ),
+  });
+  const result = await provider.generate({
+    model: "groq/compound",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  });
+  // compound runs search automatically — no tool is declared
+  assert.equal(captured[0]!.body.tools, undefined);
+  assert.deepEqual(result.citations, [
+    { url: "https://a.com", title: "A", snippet: "snippet" },
+  ]);
+});
+
+test("web search: rejects models without web search", async () => {
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)]),
+  });
+  await assert.rejects(
+    provider.generate({
+      model: "llama-3.3-70b-versatile",
+      messages: [textMessage("user", "q")],
+      webSearch: true,
+    }),
+    (error: unknown) =>
+      error instanceof CardanError && error.code === "invalid_request",
+  );
+});

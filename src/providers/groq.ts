@@ -11,7 +11,9 @@ import { parseSse } from "../sse.js";
 import { resolveRetry, withRetry } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
+  addCitations,
   bytesToBase64,
+  normalizeWebSearch,
   parseStructuredOutput,
   parseToolArgs,
   syntheticCallId,
@@ -30,6 +32,7 @@ import {
   type RetryOptions,
   type StreamEvent,
   type Usage,
+  type WebCitation,
 } from "../types.js";
 
 export type GroqModel =
@@ -71,6 +74,12 @@ const TOGGLE_ONLY_REASONING = /qwen/i;
 /** Models supporting `strict: true` structured outputs (constrained decoding). */
 const STRICT_OUTPUT_MODELS = /gpt-oss/i;
 
+/** Reasoning models exposing the built-in `browser_search` tool. */
+const BROWSER_SEARCH_MODELS = /gpt-oss/i;
+
+/** Compound systems that run web search automatically (no tool to declare). */
+const COMPOUND_MODELS = /^(?:groq\/)?compound/i;
+
 /** Groq's graded `reasoning_effort` (gpt-oss) tops out at `high`. */
 const EFFORT_MAP: Record<ReasoningEffort, string> = {
   low: "low",
@@ -92,13 +101,19 @@ interface ChatUsage {
   completion_tokens_details?: { reasoning_tokens?: number };
 }
 
+interface GroqMessage {
+  content?: string | null;
+  reasoning?: string | null;
+  tool_calls?: ChatToolCall[];
+  /** Compound systems: per-tool execution records, may carry search results. */
+  executed_tools?: unknown[];
+  /** Some shapes attach search hits directly on the message. */
+  search_results?: unknown;
+}
+
 interface ChatResponseBody {
   choices?: Array<{
-    message?: {
-      content?: string | null;
-      reasoning?: string | null;
-      tool_calls?: ChatToolCall[];
-    };
+    message?: GroqMessage;
     finish_reason?: string | null;
   }>;
   usage?: ChatUsage;
@@ -112,10 +127,11 @@ interface ChatStreamChunk {
       reasoning?: string | null;
       tool_calls?: Array<ChatToolCall & { index?: number }>;
     };
+    message?: GroqMessage;
     finish_reason?: string | null;
   }>;
   usage?: ChatUsage | null;
-  x_groq?: { usage?: ChatUsage } | null;
+  x_groq?: { usage?: ChatUsage; executed_tools?: unknown[] } | null;
   error?: { message?: string } | null;
 }
 
@@ -316,6 +332,33 @@ export class GroqProvider implements Provider {
       if (effort) body.reasoning_effort = effort;
     }
 
+    if (normalizeWebSearch(options.webSearch)) {
+      const browser = BROWSER_SEARCH_MODELS.test(options.model);
+      const compound = COMPOUND_MODELS.test(options.model);
+      if (!browser && !compound) {
+        throw new CardanError(
+          "invalid_request",
+          `model "${options.model}" does not support web search`,
+          { provider: this.name },
+        );
+      }
+      if (browser) {
+        if (options.output) {
+          throw new CardanError(
+            "invalid_request",
+            "Groq browser search is incompatible with structured output",
+            { provider: this.name },
+          );
+        }
+        // reasoning models declare the built-in tool explicitly; domain/location
+        // knobs aren't supported, so WebSearchOptions fields are ignored
+        const tools = (body.tools as Array<Record<string, unknown>>) ?? [];
+        tools.push({ type: "browser_search" });
+        body.tools = tools;
+      }
+      // compound systems run web search automatically; nothing to declare
+    }
+
     if (options.providerOptions) Object.assign(body, options.providerOptions);
     return body;
   }
@@ -358,6 +401,9 @@ export class GroqProvider implements Provider {
       usage: mapUsage(raw.usage ?? undefined),
       raw,
     };
+    const citations: WebCitation[] = [];
+    if (message) extractGroqCitations(message, citations);
+    if (citations.length) result.citations = citations;
     if (options.output && result.finishReason !== "refusal") {
       result.output = parseStructuredOutput(
         content,
@@ -376,6 +422,7 @@ export class GroqProvider implements Provider {
     let finishReason: FinishReason = "other";
     let sawFinish = false;
     let usage = emptyUsage();
+    const citations: WebCitation[] = [];
 
     const flushCalls = function* (provider: string): Generator<StreamEvent> {
       for (const [, call] of [...pending.entries()].sort((a, b) => a[0] - b[0])) {
@@ -392,7 +439,12 @@ export class GroqProvider implements Provider {
     for await (const { data } of parseSse(body)) {
       if (data.trim() === "[DONE]") {
         yield* flushCalls(this.name);
-        yield { type: "finish", reason: finishReason, usage };
+        yield {
+          type: "finish",
+          reason: finishReason,
+          usage,
+          ...(citations.length ? { citations } : {}),
+        };
         return;
       }
       let chunk: ChatStreamChunk;
@@ -411,8 +463,14 @@ export class GroqProvider implements Provider {
       // the finish_reason chunk carries usage (top-level and under x_groq)
       const chunkUsage = chunk.usage ?? chunk.x_groq?.usage;
       if (chunkUsage) usage = mapUsage(chunkUsage);
+      // compound systems surface search results on the final chunk's message
+      // or x_groq block; best-effort, shapes vary by system
+      if (chunk.x_groq?.executed_tools) {
+        collectFromExecutedTools(chunk.x_groq.executed_tools, citations);
+      }
       const choice = chunk.choices?.[0];
       if (!choice) continue;
+      if (choice.message) extractGroqCitations(choice.message, citations);
       const delta = choice.delta ?? {};
       if (delta.reasoning) {
         yield { type: "thinking_delta", text: delta.reasoning };
@@ -447,7 +505,12 @@ export class GroqProvider implements Provider {
     // without a [DONE] sentinel; once finish_reason is seen the response is
     // complete, so emit finish rather than treat it as a cut connection
     if (sawFinish) {
-      yield { type: "finish", reason: finishReason, usage };
+      yield {
+        type: "finish",
+        reason: finishReason,
+        usage,
+        ...(citations.length ? { citations } : {}),
+      };
       return;
     }
     throw new CardanError("network", "stream ended unexpectedly", {
@@ -459,6 +522,49 @@ export class GroqProvider implements Provider {
 // ---------------------------------------------------------------------------
 // Conversion helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Best-effort extraction of cited sources from a Groq message. Compound
+ * systems expose them under `executed_tools[].search_results.results` or a
+ * message-level `search_results.results`; gpt-oss `browser_search` keeps
+ * citations inline in the text (no structured URLs), so those stay in `raw`.
+ */
+function extractGroqCitations(message: GroqMessage, out: WebCitation[]): void {
+  collectFromSearchResults(message.search_results, out);
+  if (Array.isArray(message.executed_tools)) {
+    collectFromExecutedTools(message.executed_tools, out);
+  }
+}
+
+function collectFromExecutedTools(tools: unknown[], out: WebCitation[]): void {
+  for (const tool of tools) {
+    if (tool && typeof tool === "object") {
+      collectFromSearchResults(
+        (tool as { search_results?: unknown }).search_results,
+        out,
+      );
+    }
+  }
+}
+
+function collectFromSearchResults(searchResults: unknown, out: WebCitation[]): void {
+  const results = (searchResults as { results?: unknown })?.results;
+  if (!Array.isArray(results)) return;
+  for (const item of results) {
+    if (item && typeof item === "object") {
+      const obj = item as Record<string, unknown>;
+      if (obj.url) {
+        addCitations(out, [
+          {
+            url: String(obj.url),
+            ...(obj.title ? { title: String(obj.title) } : {}),
+            ...(obj.content ? { snippet: String(obj.content) } : {}),
+          },
+        ]);
+      }
+    }
+  }
+}
 
 function convertReasoningEffort(
   model: string,
