@@ -175,6 +175,42 @@ test("parses response: parts, finish reason, usage totals", async () => {
   assert.equal(result.usage.output.total, 5);
 });
 
+test("usage: thinking-token breakdown maps to output.details.reasoning without double-counting", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          ...RESPONSE_FIXTURE,
+          usage: {
+            input_tokens: 10,
+            output_tokens: 30,
+            output_tokens_details: { thinking_tokens: 12 },
+          },
+        }),
+    ]),
+  });
+  const result = await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+  });
+  // total stays output_tokens; reasoning is only a breakdown, not re-added
+  assert.equal(result.usage.output.total, 30);
+  assert.deepEqual(result.usage.output.details, { reasoning: 12 });
+});
+
+test("usage: no thinking breakdown means no fabricated reasoning detail", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)]),
+  });
+  const result = await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+  });
+  assert.deepEqual(result.usage.output.details, {});
+});
+
 test("maps HTTP errors and respects Retry-After on retry", async () => {
   const captured: Captured[] = [];
   const provider = new AnthropicProvider({

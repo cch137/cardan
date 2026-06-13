@@ -409,11 +409,19 @@ export class GeminiProvider implements Provider {
               ? { signature: part.thoughtSignature }
               : {}),
           };
-        } else if (typeof part.text === "string" && part.text.length > 0) {
+        } else if (
+          typeof part.text === "string" &&
+          (part.text.length > 0 || part.thoughtSignature)
+        ) {
+          // any Part can carry a thoughtSignature (Gemini 3), not just function
+          // calls; ride it on the delta so the signed part survives collection
+          const signature = part.thoughtSignature
+            ? { signature: part.thoughtSignature }
+            : {};
           if (part.thought) {
-            yield { type: "thinking_delta", text: part.text };
+            yield { type: "thinking_delta", text: part.text, ...signature };
           } else {
-            yield { type: "text_delta", text: part.text };
+            yield { type: "text_delta", text: part.text, ...signature };
           }
         }
       }

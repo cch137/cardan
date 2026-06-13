@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { GeminiProvider } from "../src/providers/gemini.js";
-import { CardanError, collectStream, textMessage } from "../src/index.js";
+import {
+  CardanError,
+  collectStream,
+  collectStreamToMessage,
+  textMessage,
+} from "../src/index.js";
 import type { Message } from "../src/index.js";
 
 interface Captured {
@@ -454,6 +459,133 @@ test("stream without finishReason raises network error", async () => {
     ),
     (error: unknown) => error instanceof CardanError && error.code === "network",
   );
+});
+
+// each chunk is one complete, signed Part (text / thought / functionCall)
+const SIGNED_PARTS = [
+  { text: "thinking summary", thought: true, thoughtSignature: "sig_thinking" },
+  { text: "hello", thoughtSignature: "sig_text" },
+  {
+    functionCall: { id: "call_123", name: "get_weather", args: { city: "Taipei" } },
+    thoughtSignature: "sig_call",
+  },
+];
+
+function sseFromParts(parts: unknown[]): string {
+  return parts
+    .map((part, index) =>
+      `data: ${JSON.stringify({
+        candidates: [
+          {
+            content: { role: "model", parts: [part] },
+            ...(index === parts.length - 1 ? { finishReason: "STOP" } : {}),
+          },
+        ],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: index + 1 },
+      })}\n\n`,
+    )
+    .join("");
+}
+
+test("streaming preserves thoughtSignature on text, thought, and function-call parts", async () => {
+  const provider = new GeminiProvider({
+    apiKey: "g-test",
+    fetch: mockFetch([
+      () =>
+        new Response(sseFromParts(SIGNED_PARTS), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        }),
+    ]),
+  });
+  const message = await collectStreamToMessage(
+    provider.stream({ model: "gemini-3.5-flash", messages: [textMessage("user", "q")] }),
+  );
+  assert.deepEqual(message.content, [
+    { type: "thinking", text: "thinking summary", signature: "sig_thinking" },
+    { type: "text", text: "hello", signature: "sig_text" },
+    {
+      type: "tool_call",
+      id: "call_123",
+      name: "get_weather",
+      args: { city: "Taipei" },
+      signature: "sig_call",
+    },
+  ]);
+});
+
+test("streaming and non-streaming yield identical signed parts", async () => {
+  const streamProvider = new GeminiProvider({
+    apiKey: "g-test",
+    fetch: mockFetch([
+      () => new Response(sseFromParts(SIGNED_PARTS), { status: 200 }),
+    ]),
+  });
+  const streamed = await collectStream(
+    streamProvider.stream({ model: "gemini-3.5-flash", messages: [textMessage("user", "q")] }),
+  );
+
+  const nonStreamProvider = new GeminiProvider({
+    apiKey: "g-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          candidates: [
+            { content: { role: "model", parts: SIGNED_PARTS }, finishReason: "STOP" },
+          ],
+          usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+        }),
+    ]),
+  });
+  const nonStreamed = await nonStreamProvider.generate({
+    model: "gemini-3.5-flash",
+    messages: [textMessage("user", "q")],
+  });
+
+  assert.deepEqual(streamed.message.content, nonStreamed.message.content);
+});
+
+test("collected signed message re-serializes into separate signed Parts", async () => {
+  const captured: Captured[] = [];
+  const provider = new GeminiProvider({
+    apiKey: "g-test",
+    fetch: mockFetch(
+      [
+        () => new Response(sseFromParts(SIGNED_PARTS), { status: 200 }),
+        () => jsonResponse(RESPONSE_FIXTURE),
+      ],
+      captured,
+    ),
+  });
+  const assistant = await collectStreamToMessage(
+    provider.stream({ model: "gemini-3.5-flash", messages: [textMessage("user", "q")] }),
+  );
+  await provider.generate({
+    model: "gemini-3.5-flash",
+    messages: [
+      textMessage("user", "q"),
+      assistant,
+      {
+        role: "tool",
+        content: [{ type: "tool_result", callId: "call_123", result: { temp: 20 } }],
+      },
+    ],
+  });
+
+  const contents = captured[1]!.body.contents as Array<{ role: string; parts: unknown[] }>;
+  // signed thought, signed text, and signed functionCall stay distinct Parts
+  assert.deepEqual(contents[1]!.parts, [
+    { text: "thinking summary", thought: true, thoughtSignature: "sig_thinking" },
+    { text: "hello", thoughtSignature: "sig_text" },
+    {
+      functionCall: { id: "call_123", name: "get_weather", args: { city: "Taipei" } },
+      thoughtSignature: "sig_call",
+    },
+  ]);
+  // functionResponse carries the matching function-call id
+  assert.deepEqual(contents[2]!.parts, [
+    { functionResponse: { id: "call_123", name: "get_weather", response: { temp: 20 } } },
+  ]);
 });
 
 test("embed: batchEmbedContents request shape and response parsing", async () => {

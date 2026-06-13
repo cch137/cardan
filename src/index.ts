@@ -63,7 +63,7 @@ export { DEFAULT_RETRY, emptyUsage, textMessage } from "./types.js";
 export { CardanError, isCardanError, type ErrorCode } from "./errors.js";
 export type { JsonSchema, SchemaInput, ZodLikeSchema } from "./schema.js";
 export { normalizeMessages } from "./normalize.js";
-export { collectStream } from "./stream.js";
+export { collectStream, collectStreamToMessage } from "./stream.js";
 export {
   AnthropicProvider,
   type AnthropicModel,

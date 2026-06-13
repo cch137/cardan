@@ -51,7 +51,7 @@ const anthropic = new AnthropicProvider({ apiKey: "sk-…" });
 await anthropic.generate({ model: "claude-opus-4-8", messages });
 ```
 
-`collectStream(stream)` accumulates a stream into a `GenerateResult`-shaped value (message + finishReason + usage).
+`collectStream(stream)` accumulates a stream into a `GenerateResult`-shaped value (message + finishReason + usage); `collectStreamToMessage(stream)` returns just the assistant `Message`, ready to push back into the next request. See [Reasoning / thinking state](#reasoning--thinking-state).
 
 ## Behavior notes
 
@@ -66,9 +66,23 @@ await anthropic.generate({ model: "claude-opus-4-8", messages });
 - **Capability table**: models that reject sampling params (Fable 5 / Mythos 5 / Opus 4.7+, OpenAI o-series / non-chat gpt-5*) have `temperature`/`topP` dropped silently; Gemini 3 maps `reasoning.effort` to `thinkingLevel`, Gemini 2.x to `thinkingBudget`.
 - **`reasoning`**: `{ enabled: true }` → Anthropic adaptive thinking / Gemini `includeThoughts` / OpenAI `reasoning.summary: "auto"`; `effort` → Anthropic `output_config.effort` / Gemini thinking level or budget / OpenAI `reasoning.effort` (`max` caps to `xhigh`; `enabled: false` → `effort: "none"`, gpt-5.1+ only). Use `providerOptions` for anything provider-specific (e.g. beta headers go in provider `headers`).
 - **Thinking parts**: replayed with their `signature`; unsigned thinking parts are dropped on send; `redacted: true` maps to Anthropic `redacted_thinking`.
-- **Tool call ids**: provider-assigned ids are preserved verbatim. Gemini 2.x omits function-call ids, so the adapter synthesizes `cardan_call_…` ids for pairing and strips them on replay; Gemini `thoughtSignature`s ride on `signature` of text/tool_call parts and are required for Gemini 3 function-calling replay (text-part signatures are not preserved in streaming).
+- **Tool call ids**: provider-assigned ids are preserved verbatim. Gemini 2.x omits function-call ids, so the adapter synthesizes `cardan_call_…` ids for pairing and strips them on replay; Gemini `thoughtSignature`s ride on `signature` of text/thinking/tool_call parts and are required for Gemini 3 function-calling replay (preserved identically in streaming and non-streaming — see below).
 - **Gemini files**: image/file input supports inline bytes (`inlineData`) and `URL` → `fileData.fileUri` passthrough (Files API URIs); cardan does not wrap the File API itself. `embed` uses `batchEmbedContents`, which returns no usage metadata.
 - **Errors**: all failures are `CardanError` with `code` (`auth` / `rate_limit` / `overloaded` / `context_length` / `invalid_request` / `not_found` / `server` / `network` / `aborted` / `unknown`), `status`, `retryable`, and the raw provider body in `raw`.
+
+## Reasoning / thinking state
+
+Providers return opaque reasoning state that must be replayed verbatim for multi-turn / tool-use loops to keep working. cardan normalizes it onto `ThinkingPart`/`TextPart`/`ToolCallPart` and replays it to the **same** provider:
+
+- **Anthropic** — `thinking` blocks carry `signature`; `redacted_thinking` carries opaque `data` (mapped to `signature` with `redacted: true`). Both are replayed unchanged and in order; unsigned thinking is dropped on send.
+- **OpenAI / xAI** — stateless by default (`store: false` + `include: ["reasoning.encrypted_content"]`). The encrypted reasoning item is held in `ThinkingPart.signature` with its item id in `ThinkingPart.id`; both are required to replay, so summary-only thinking (no `encrypted_content`) is dropped. For server-side state instead, pass `previous_response_id` via `providerOptions`.
+- **Gemini** — every `Part` (text, thought, or `functionCall`) may carry a `thoughtSignature`; it rides on `signature` and is sent back on the original Part. Signed Parts are never merged with each other or with unsigned Parts. Function-call `id`s are preserved and echoed in the matching `functionResponse`.
+
+**Streaming and non-streaming preserve the same replay-critical state.** Signatures, encrypted reasoning content, ids, and tool-call signatures all survive collection identically.
+
+Use **`collectStream(stream)`** / **`collectStreamToMessage(stream)`** to capture a streamed turn — they reassemble the parts (including signatures) correctly. If you consume stream events yourself, you must retain the `signature` field on `text_delta`/`thinking_delta` deltas, `thinking_signature` events, and `tool_call` event signatures; dropping them loses reasoning state and breaks the next turn. Push the collected `Message` back into `messages` as-is — don't reduce a tool-use turn to its text.
+
+Opaque state is provider-specific: replay a reasoning-bearing turn to the **same** provider that produced it. cardan does not strip foreign signatures, so feeding one provider's thinking/reasoning parts to another will send invalid opaque state — start a fresh turn (or drop the thinking parts) when switching providers mid-conversation.
 
 ## Development
 

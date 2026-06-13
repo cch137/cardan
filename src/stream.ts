@@ -3,7 +3,9 @@ import {
   type ContentPart,
   type FinishReason,
   type GenerateResult,
+  type Message,
   type StreamEvent,
+  type TextPart,
   type ThinkingPart,
 } from "./types.js";
 
@@ -25,17 +27,30 @@ export async function collectStream(
     switch (event.type) {
       case "text_delta": {
         const part = last();
-        if (part?.type === "text") part.text += event.text;
-        else content.push({ type: "text", text: event.text });
+        // a signed text part is closed: never merge further deltas into it,
+        // and never merge two separately signed parts together
+        let target: TextPart;
+        if (part?.type === "text" && part.signature === undefined) {
+          part.text += event.text;
+          target = part;
+        } else {
+          target = { type: "text", text: event.text };
+          content.push(target);
+        }
+        if (event.signature !== undefined) target.signature = event.signature;
         break;
       }
       case "thinking_delta": {
         const part = last();
+        let target: ThinkingPart;
         if (part?.type === "thinking" && part.signature === undefined) {
           part.text += event.text;
+          target = part;
         } else {
-          content.push({ type: "thinking", text: event.text });
+          target = { type: "thinking", text: event.text };
+          content.push(target);
         }
+        if (event.signature !== undefined) target.signature = event.signature;
         break;
       }
       case "thinking_signature": {
@@ -79,4 +94,17 @@ export async function collectStream(
     finishReason,
     usage,
   };
+}
+
+/**
+ * Collects a stream into just the assistant `Message`, ready to push back into
+ * the next request's `messages`. Replay-critical state (thinking signatures,
+ * encrypted reasoning content, tool-call signatures) is preserved, so this is
+ * the recommended way to capture a streamed turn for multi-turn replay — much
+ * safer than reassembling a message from raw stream events by hand.
+ */
+export async function collectStreamToMessage(
+  stream: AsyncIterable<StreamEvent>,
+): Promise<Message> {
+  return (await collectStream(stream)).message;
 }

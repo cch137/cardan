@@ -74,6 +74,10 @@ interface AnthropicUsage {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  // thinking-token breakdown, if the API ever reports one separately (today
+  // thinking is folded into output_tokens); defensively read both spellings
+  output_tokens_details?: { thinking_tokens?: number };
+  thinking_tokens?: number;
 }
 
 interface AnthropicMessageResponse {
@@ -529,5 +533,10 @@ function mergeUsage(target: Usage, usage: AnthropicUsage | undefined): void {
   if (usage.output_tokens !== undefined) {
     target.output.total = usage.output_tokens;
   }
+  // reasoning tokens are already counted inside output_tokens; expose the
+  // breakdown in details without double-counting the total
+  const reasoning =
+    usage.output_tokens_details?.thinking_tokens ?? usage.thinking_tokens;
+  if (reasoning !== undefined) target.output.details.reasoning = reasoning;
 }
 

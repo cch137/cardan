@@ -119,8 +119,14 @@ export type FinishReason =
   | "other";
 
 export type StreamEvent =
-  | { type: "text_delta"; text: string }
-  | { type: "thinking_delta"; text: string }
+  /**
+   * A run of visible text. `signature` (Gemini `thoughtSignature`) closes the
+   * text part: it carries opaque replay state, so collection must not merge
+   * further deltas into a signed part.
+   */
+  | { type: "text_delta"; text: string; signature?: string }
+  /** A run of thinking-summary text; `signature` closes the part (see above). */
+  | { type: "thinking_delta"; text: string; signature?: string }
   /** Emitted when a thinking block closes with a replay signature. */
   | { type: "thinking_signature"; signature: string; id?: string }
   /** Emitted once per tool call, when its arguments are complete. */
