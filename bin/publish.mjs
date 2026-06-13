@@ -3,23 +3,30 @@
 //
 // Runs a full publish checklist before handing off to `npm publish`:
 //   - npm auth, git cleanliness, package.json sanity
+//   - cardan subtree is synced to the public mirror repo (the monorepo is the
+//     single source of truth; the public repo is produced only by subtree push)
 //   - registry lookup: is this version already published? is it newer than latest?
 //   - typecheck / test / build, then verify the freshly built dist
+//   - re-check the working tree to ensure the build left metadata/output clean
 //   - inspect the actual tarball (npm pack) for missing or leaked files
 //   - confirm, then publish (skipping lifecycle scripts since we just ran them)
 //
 // Usage:
 //   node bin/publish.mjs [--dry-run] [--yes] [--tag <tag>] [--otp <code>]
-//                        [--allow-dirty]
+//                        [--allow-dirty] [--remote <name>] [--branch <name>]
+//                        [--skip-subtree-check]
 //
 // Flags:
-//   --dry-run       Run every check + `npm publish --dry-run`; never publishes.
-//   --yes, -y       Skip the interactive confirmation prompt.
-//   --tag <tag>     dist-tag to publish under (default: latest). A non-latest
-//                   tag relaxes the "must be newer than latest" ordering check.
-//   --otp <code>    npm one-time password (2FA). Omit to let npm prompt.
-//   --allow-dirty   Permit publishing with uncommitted changes in the package.
-//   --help, -h      Show this help.
+//   --dry-run            Run every check + `npm publish --dry-run`; never publishes.
+//   --yes, -y            Skip the interactive confirmation prompt.
+//   --tag <tag>          dist-tag to publish under (default: latest). A non-latest
+//                        tag relaxes the "must be newer than latest" ordering check.
+//   --otp <code>         npm one-time password (2FA). Omit to let npm prompt.
+//   --allow-dirty        Permit publishing with uncommitted changes in the package.
+//   --remote <name>      Git remote of the public mirror repo (default: cardan).
+//   --branch <name>      Branch of the public mirror repo (default: main).
+//   --skip-subtree-check Skip the subtree-sync verification (use with care).
+//   --help, -h           Show this help.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
@@ -135,7 +142,16 @@ function cmpSemver(a, b) {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const opts = { dryRun: false, yes: false, tag: "latest", otp: null, allowDirty: false };
+  const opts = {
+    dryRun: false,
+    yes: false,
+    tag: "latest",
+    otp: null,
+    allowDirty: false,
+    remote: "cardan",
+    branch: "main",
+    skipSubtreeCheck: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     switch (a) {
@@ -148,6 +164,17 @@ function parseArgs(argv) {
         break;
       case "--allow-dirty":
         opts.allowDirty = true;
+        break;
+      case "--skip-subtree-check":
+        opts.skipSubtreeCheck = true;
+        break;
+      case "--remote":
+        opts.remote = argv[++i];
+        if (!opts.remote) fail("--remote requires a value");
+        break;
+      case "--branch":
+        opts.branch = argv[++i];
+        if (!opts.branch) fail("--branch requires a value");
         break;
       case "--tag":
         opts.tag = argv[++i];
@@ -178,6 +205,9 @@ Options:
   --tag <tag>     dist-tag (default: latest). Non-latest relaxes ordering check.
   --otp <code>    npm 2FA one-time password.
   --allow-dirty   Allow uncommitted changes in the package directory.
+  --remote <name> Public mirror git remote (default: cardan).
+  --branch <name> Public mirror branch (default: main).
+  --skip-subtree-check  Skip the subtree-sync verification.
   --help, -h      Show this help.`;
 
 // ---------------------------------------------------------------------------
@@ -260,6 +290,103 @@ function checkGitClean(allowDirty) {
     }
   } else {
     ok("clean");
+  }
+}
+
+const indent = (s) =>
+  s
+    .split("\n")
+    .map((l) => "      " + l)
+    .join("\n");
+
+/**
+ * Verify the public mirror repo is in sync with the cardan subtree.
+ *
+ * The monorepo is the single source of truth; the public repo is produced
+ * solely by `git subtree push --prefix=<pkg> <remote> <branch>`. A subtree
+ * split produces synthetic commits whose tree is exactly the prefix subtree,
+ * so the public repo's HEAD tree must equal `HEAD:<prefix>` here. Comparing
+ * those two tree object ids is exact and far cheaper than re-running split.
+ */
+function checkSubtreeSynced(opts) {
+  step("Checking cardan subtree is synced to public repo");
+  if (opts.skipSubtreeCheck) {
+    ok("skipped (--skip-subtree-check)");
+    return;
+  }
+  const inRepo = capture("git", ["rev-parse", "--is-inside-work-tree"]);
+  if (!inRepo.ok) {
+    fail("not inside a git repo — cannot verify subtree sync (use --skip-subtree-check to override)");
+  }
+  const topRes = capture("git", ["rev-parse", "--show-toplevel"]);
+  if (!topRes.ok) fail("could not resolve git repo root");
+  const top = topRes.stdout.trim();
+
+  let prefix = PKG_DIR.startsWith(top) ? PKG_DIR.slice(top.length) : null;
+  if (prefix === null) fail(`package dir ${PKG_DIR} is not inside repo root ${top}`);
+  prefix = prefix.replace(/^[/\\]+/, "").split("\\").join("/");
+
+  const remoteUrl = capture("git", ["-C", top, "remote", "get-url", opts.remote]);
+  if (!remoteUrl.ok) {
+    fail(
+      `git remote "${opts.remote}" is not configured — the public mirror repo must exist first.\n` +
+        `      Create github.com/cch137/cardan, then add the remote:\n` +
+        `        git remote add ${opts.remote} git@github.com:cch137/cardan.git\n` +
+        `      (override with --remote <name>, or bypass with --skip-subtree-check)`,
+    );
+  }
+
+  const fetched = capture("git", ["-C", top, "fetch", opts.remote, opts.branch]);
+  if (!fetched.ok) {
+    fail(
+      `could not fetch ${opts.remote}/${opts.branch}:\n` +
+        indent((fetched.stderr || fetched.stdout).trim()) +
+        `\n      Ensure the public repo exists and you have push/pull access.`,
+    );
+  }
+
+  const localTree = capture("git", ["-C", top, "rev-parse", `HEAD:${prefix}`]);
+  if (!localTree.ok) {
+    fail(`could not read subtree at HEAD:${prefix} — commit your changes first`);
+  }
+  const remoteTree = capture("git", ["-C", top, "rev-parse", "FETCH_HEAD^{tree}"]);
+  if (!remoteTree.ok) fail("could not read fetched public repo tree");
+
+  if (localTree.stdout.trim() === remoteTree.stdout.trim()) {
+    ok(`${opts.remote}/${opts.branch} matches the subtree at HEAD`);
+    return;
+  }
+
+  const msg =
+    `public repo ${opts.remote}/${opts.branch} is out of sync with the cardan subtree.\n` +
+    `      The monorepo is the source of truth — push the latest subtree first:\n` +
+    `        git subtree push --prefix=${prefix} ${opts.remote} ${opts.branch}\n` +
+    `      then re-run this script.`;
+  if (opts.dryRun) warn(msg);
+  else fail(msg);
+}
+
+/** After build/typecheck, ensure nothing tracked got dirtied (metadata/output). */
+function checkCleanAfterBuild(opts) {
+  step("Re-checking working tree after build");
+  const inRepo = capture("git", ["rev-parse", "--is-inside-work-tree"]);
+  if (!inRepo.ok) {
+    ok("not a git repo, skipped");
+    return;
+  }
+  const status = capture("git", ["status", "--porcelain", "--", "."]);
+  const dirty = status.stdout.trim();
+  if (!dirty) {
+    ok("clean");
+    return;
+  }
+  if (opts.allowDirty) {
+    warn("build modified tracked files (--allow-dirty)\n" + indent(dirty));
+  } else {
+    fail(
+      "build/typecheck modified tracked files — package metadata or output must be committed:\n" +
+        indent(dirty),
+    );
   }
 }
 
@@ -434,9 +561,11 @@ async function main() {
   checkRequiredFiles();
   checkNpmAuth();
   checkGitClean(opts.allowDirty);
+  checkSubtreeSynced(opts);
   const { published } = fetchRegistryVersions(pkg.name);
   checkVersion(pkg, published, opts.tag);
   runBuildPipeline();
+  checkCleanAfterBuild(opts);
   inspectTarball();
 
   if (warnings.length) {
