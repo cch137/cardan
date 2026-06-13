@@ -1,0 +1,87 @@
+{
+  "name": "cardan",
+  "version": "0.1.0",
+  "description": "Unified, zero-dependency adapter for major LLM provider APIs",
+  "license": "MIT",
+  "author": "cch137",
+  "keywords": [
+    "llm",
+    "ai",
+    "sdk",
+    "api",
+    "ai-sdk",
+    "llm-sdk",
+    "llm-api",
+    "llm-client",
+    "anthropic",
+    "claude",
+    "openai",
+    "gpt",
+    "chatgpt",
+    "gpt-5",
+    "gemini",
+    "google-gemini",
+    "xai",
+    "grok",
+    "groq",
+    "llama",
+    "modal",
+    "embeddings",
+    "streaming",
+    "tool-calling",
+    "function-calling",
+    "structured-output",
+    "json-schema",
+    "reasoning",
+    "vision",
+    "multi-provider",
+    "llm-gateway",
+    "openrouter",
+    "langchain",
+    "litellm",
+    "vercel-ai",
+    "zod",
+    "typescript",
+    "deno",
+    "edge",
+    "zero-dependency",
+    "fetch"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "DESIGN.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "release": "node bin/publish.mjs",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "peerDependencies": {
+    "zod": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsdown": "^0.15.7",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.1.12"
+  }
+}

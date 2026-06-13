@@ -1,0 +1,692 @@
+import {
+  CardanError,
+  codeFromStatus,
+  parseRetryAfter,
+  wrapFetchError,
+  type ErrorCode,
+} from "../errors.js";
+import { readEnv } from "../env.js";
+import { normalizeMessages, partsToText } from "../normalize.js";
+import { parseSse } from "../sse.js";
+import { resolveRetry, withRetry } from "../retry.js";
+import { toJsonSchema } from "../schema.js";
+import {
+  bytesToBase64,
+  parseStructuredOutput,
+  parseToolArgs,
+} from "../util.js";
+import {
+  emptyUsage,
+  type ContentPart,
+  type EmbedOptions,
+  type EmbedResult,
+  type FinishReason,
+  type GenerateOptions,
+  type GenerateResult,
+  type Message,
+  type Provider,
+  type ReasoningEffort,
+  type RetryOptions,
+  type StreamEvent,
+  type ThinkingPart,
+  type Usage,
+} from "../types.js";
+
+export type OpenAIModel =
+  | "gpt-5.5"
+  | "gpt-5.4"
+  | "gpt-5.4-mini"
+  | "gpt-5.4-nano"
+  | "gpt-5.2"
+  | "gpt-5.2-pro"
+  | "gpt-5.1"
+  | "gpt-5.1-codex"
+  | "gpt-5"
+  | "gpt-5-mini"
+  | "gpt-5-nano"
+  | "gpt-4.1"
+  | "gpt-4.1-mini"
+  | "gpt-4.1-nano"
+  | "gpt-4o"
+  | "gpt-4o-mini"
+  | "o3"
+  | "o4-mini"
+  | "text-embedding-3-small"
+  | "text-embedding-3-large"
+  | (string & {});
+
+export interface OpenAIProviderOptions {
+  /** Defaults to the `OPENAI_API_KEY` environment variable. */
+  apiKey?: string;
+  /** Defaults to `https://api.openai.com`. */
+  baseUrl?: string;
+  /** Extra headers on every request (e.g. `OpenAI-Organization`). */
+  headers?: Record<string, string>;
+  /** Custom fetch implementation (testing, proxies). */
+  fetch?: typeof globalThis.fetch;
+  /** Default retry behavior for all requests; `false` disables. */
+  retry?: Partial<RetryOptions> | false;
+}
+
+const DEFAULT_BASE_URL = "https://api.openai.com";
+
+/** OpenAI has no `max`; it tops out at `xhigh`. */
+const EFFORT_MAP: Record<ReasoningEffort, string> = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "xhigh",
+};
+
+interface OpenAIItem {
+  type?: string;
+  [key: string]: unknown;
+}
+
+interface OpenAIUsage {
+  input_tokens?: number;
+  input_tokens_details?: { cached_tokens?: number };
+  output_tokens?: number;
+  output_tokens_details?: { reasoning_tokens?: number };
+}
+
+interface OpenAIResponseBody {
+  status?: string;
+  output?: OpenAIItem[];
+  usage?: OpenAIUsage;
+  error?: { code?: string; message?: string } | null;
+  incomplete_details?: { reason?: string } | null;
+}
+
+/**
+ * OpenAI adapter built on the **Responses API** (`/v1/responses`), used
+ * statelessly: every request sends `store: false` plus
+ * `include: ["reasoning.encrypted_content"]`, so multi-turn context is
+ * replayed from `messages` and reasoning survives across turns without
+ * server-side storage (override via `providerOptions` if you want `store`).
+ *
+ * Capability notes:
+ * - the Responses API has no stop-sequence parameter; `stopSequences` is
+ *   ignored;
+ * - `reasoning.enabled: false` maps to `effort: "none"`, which only
+ *   `gpt-5.1`+ accepts — omit `reasoning` entirely for older models.
+ *
+ * Providers with Responses-compatible APIs (xAI) subclass this adapter and
+ * override the protected hooks (base URL, API key env var, sampling-param
+ * support, reasoning mapping).
+ */
+export class OpenAIProvider implements Provider {
+  readonly name: string = "openai";
+  protected readonly defaultBaseUrl: string = DEFAULT_BASE_URL;
+  protected readonly apiKeyEnv: string = "OPENAI_API_KEY";
+  private readonly options: OpenAIProviderOptions;
+  private readonly fetch: typeof globalThis.fetch;
+
+  constructor(options: OpenAIProviderOptions = {}) {
+    this.options = options;
+    this.fetch = options.fetch ?? globalThis.fetch;
+  }
+
+  async generate(options: GenerateOptions): Promise<GenerateResult> {
+    const body = await this.buildRequestBody(options, false);
+    const retry = resolveRetry(options.retry ?? this.options.retry);
+    const response = await withRetry(
+      () => this.request("/v1/responses", body, options.signal),
+      retry,
+      options.signal,
+    );
+    const raw = (await response.json()) as OpenAIResponseBody;
+    return this.parseResponse(raw, options);
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
+    const body = await this.buildRequestBody(options, true);
+    const retry = resolveRetry(options.retry ?? this.options.retry);
+    const response = await withRetry(
+      () => this.request("/v1/responses", body, options.signal),
+      retry,
+      options.signal,
+    );
+    if (!response.body) {
+      throw new CardanError("network", "response has no body", {
+        provider: this.name,
+      });
+    }
+    yield* this.parseStream(response.body);
+  }
+
+  async embed(options: EmbedOptions): Promise<EmbedResult> {
+    const body: Record<string, unknown> = {
+      model: options.model,
+      input: options.input,
+    };
+    if (options.providerOptions) Object.assign(body, options.providerOptions);
+    const retry = resolveRetry(options.retry ?? this.options.retry);
+    const response = await withRetry(
+      () => this.request("/v1/embeddings", body, options.signal),
+      retry,
+      options.signal,
+    );
+    const raw = (await response.json()) as {
+      data?: Array<{ index?: number; embedding?: number[] }>;
+      usage?: { prompt_tokens?: number };
+    };
+    const data = [...(raw.data ?? [])].sort(
+      (a, b) => (a.index ?? 0) - (b.index ?? 0),
+    );
+    const usage = emptyUsage();
+    usage.input.total = raw.usage?.prompt_tokens ?? 0;
+    return { embeddings: data.map((item) => item.embedding ?? []), usage, raw };
+  }
+
+  // -------------------------------------------------------------------------
+  // Request
+  // -------------------------------------------------------------------------
+
+  private apiKey(): string {
+    const key = this.options.apiKey ?? readEnv(this.apiKeyEnv);
+    if (!key) {
+      throw new CardanError(
+        "auth",
+        `missing ${this.name} API key: pass \`apiKey\` or set ${this.apiKeyEnv}`,
+        { provider: this.name },
+      );
+    }
+    return key;
+  }
+
+  private async request(
+    path: string,
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const url = `${this.options.baseUrl ?? this.defaultBaseUrl}${path}`;
+    let response: Response;
+    try {
+      response = await this.fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.apiKey()}`,
+          ...this.options.headers,
+        },
+        body: JSON.stringify(body),
+        signal: signal ?? null,
+      });
+    } catch (error) {
+      throw wrapFetchError(error, this.name);
+    }
+    if (!response.ok) {
+      throw await this.httpError(response);
+    }
+    return response;
+  }
+
+  private async httpError(response: Response): Promise<CardanError> {
+    let raw: unknown;
+    let message = `HTTP ${response.status}`;
+    let errorCode: string | undefined;
+    try {
+      raw = await response.json();
+      const error = (raw as { error?: { message?: string; code?: string } })
+        .error;
+      if (error?.message) message = error.message;
+      if (typeof error?.code === "string") errorCode = error.code;
+    } catch {
+      // keep generic message; body was not JSON
+    }
+    let code: ErrorCode = codeFromStatus(response.status);
+    if (
+      code === "invalid_request" &&
+      (errorCode === "context_length_exceeded" ||
+        /context (window|length)|too many tokens/i.test(message))
+    ) {
+      code = "context_length";
+    }
+    return new CardanError(code, message, {
+      provider: this.name,
+      status: response.status,
+      retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
+      raw,
+    });
+  }
+
+  private async buildRequestBody(
+    options: GenerateOptions,
+    stream: boolean,
+  ): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = {
+      model: options.model,
+      input: convertMessages(normalizeMessages(options.messages)),
+      store: false,
+    };
+    if (stream) body.stream = true;
+    if (options.maxOutputTokens !== undefined) {
+      body.max_output_tokens = options.maxOutputTokens;
+    }
+    if (this.supportsSamplingParams(options.model)) {
+      if (options.temperature !== undefined)
+        body.temperature = options.temperature;
+      if (options.topP !== undefined) body.top_p = options.topP;
+    }
+    // note: the Responses API has no stop-sequence parameter
+
+    if (options.tools?.length) {
+      body.tools = await Promise.all(
+        options.tools.map(async (tool) => ({
+          type: "function",
+          name: tool.name,
+          ...(tool.description ? { description: tool.description } : {}),
+          parameters: tool.parameters
+            ? await toJsonSchema(tool.parameters)
+            : { type: "object", properties: {} },
+          // strict mode restricts schemas to the structured-output subset
+          // (additionalProperties: false, all fields required); off so
+          // arbitrary caller schemas keep working
+          strict: false,
+        })),
+      );
+    }
+    if (options.toolChoice !== undefined) {
+      body.tool_choice = convertToolChoice(options.toolChoice);
+    }
+    if (options.output) {
+      body.text = {
+        format: {
+          type: "json_schema",
+          name: "output",
+          strict: true,
+          schema: await toJsonSchema(options.output.schema),
+        },
+      };
+    }
+    if (options.reasoning) {
+      const reasoning = this.convertReasoning(options.reasoning);
+      if (reasoning) body.reasoning = reasoning;
+    }
+
+    if (options.providerOptions) Object.assign(body, options.providerOptions);
+    if (body.store === false && body.include === undefined) {
+      // encrypted reasoning items make thinking replayable across stateless turns
+      body.include = ["reasoning.encrypted_content"];
+    }
+    return body;
+  }
+
+  // -------------------------------------------------------------------------
+  // Capability hooks (overridden by Responses-compatible subclasses)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Reasoning models reject sampling parameters (`temperature`, `top_p`); the
+   * adapter drops them instead of failing the request. The `*chat*` variants
+   * (e.g. `gpt-5-chat-latest`) are non-reasoning and keep them.
+   */
+  protected supportsSamplingParams(model: string): boolean {
+    if (/^(o[0-9]|codex)/.test(model)) return false;
+    if (/^gpt-5/.test(model) && !model.includes("chat")) return false;
+    return true;
+  }
+
+  /** Returning undefined omits the `reasoning` field from the request. */
+  protected convertReasoning(
+    reasoning: NonNullable<GenerateOptions["reasoning"]>,
+  ): Record<string, unknown> | undefined {
+    // `none` is only accepted by gpt-5.1+; older reasoning models cannot
+    // disable reasoning at all
+    if (reasoning.enabled === false) return { effort: "none" };
+    return {
+      ...(reasoning.effort ? { effort: EFFORT_MAP[reasoning.effort] } : {}),
+      // summaries are the only visible thinking the Responses API exposes
+      summary: "auto",
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // Response
+  // -------------------------------------------------------------------------
+
+  private parseResponse(
+    raw: OpenAIResponseBody,
+    options: GenerateOptions,
+  ): GenerateResult {
+    if (raw.error || raw.status === "failed") {
+      throw responseFailure(raw, this.name);
+    }
+    const content: ContentPart[] = [];
+    for (const item of raw.output ?? []) {
+      convertOutputItem(item, content, this.name);
+    }
+    const result: GenerateResult = {
+      message: { role: "assistant", content },
+      finishReason: deriveFinishReason(raw),
+      usage: mapUsage(raw.usage),
+      raw,
+    };
+    if (options.output && result.finishReason !== "refusal") {
+      result.output = parseStructuredOutput(
+        content,
+        options.output.schema,
+        this.name,
+      );
+    }
+    return result;
+  }
+
+  private async *parseStream(
+    body: ReadableStream<Uint8Array>,
+  ): AsyncGenerator<StreamEvent> {
+    for await (const { data } of parseSse(body)) {
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(data) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      switch (event.type) {
+        case "response.output_text.delta":
+        // refusal text surfaces as text; the finish event carries the reason
+        case "response.refusal.delta":
+          yield { type: "text_delta", text: String(event.delta ?? "") };
+          break;
+        case "response.reasoning_summary_text.delta":
+        case "response.reasoning_text.delta":
+          yield { type: "thinking_delta", text: String(event.delta ?? "") };
+          break;
+        case "response.output_item.done": {
+          const item = event.item as OpenAIItem | undefined;
+          if (item?.type === "function_call") {
+            yield {
+              type: "tool_call",
+              id: String(item.call_id ?? ""),
+              name: String(item.name ?? ""),
+              args: parseToolArgs(String(item.arguments ?? ""), this.name),
+            };
+          } else if (
+            item?.type === "reasoning" &&
+            typeof item.encrypted_content === "string" &&
+            item.encrypted_content
+          ) {
+            yield {
+              type: "thinking_signature",
+              signature: item.encrypted_content,
+              ...(typeof item.id === "string" && item.id
+                ? { id: item.id }
+                : {}),
+            };
+          }
+          break;
+        }
+        case "response.completed":
+        case "response.incomplete": {
+          const response = (event.response ?? {}) as OpenAIResponseBody;
+          yield {
+            type: "finish",
+            reason: deriveFinishReason(response),
+            usage: mapUsage(response.usage),
+          };
+          return;
+        }
+        case "response.failed":
+          throw responseFailure(
+            (event.response ?? {}) as OpenAIResponseBody,
+            this.name,
+          );
+        case "error":
+          throw new CardanError(
+            "server",
+            String(event.message ?? "stream error"),
+            {
+              provider: this.name,
+              raw: event,
+              retryable: false,
+            },
+          );
+      }
+    }
+    // stream ended without response.completed (connection cut)
+    throw new CardanError("network", "stream ended unexpectedly", {
+      provider: this.name,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Conversion helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Converts generic messages to Responses API input items. System messages
+ * stay message items (the API accepts `system` anywhere in `input`);
+ * assistant turns split into message / function_call / reasoning items in
+ * part order; tool results become function_call_output items.
+ */
+function convertMessages(messages: Message[]): Array<Record<string, unknown>> {
+  const items: Array<Record<string, unknown>> = [];
+  for (const message of messages) {
+    switch (message.role) {
+      case "system":
+        items.push({
+          type: "message",
+          role: "system",
+          content: partsToText(message.content),
+        });
+        break;
+      case "user": {
+        const content = message.content
+          .map(convertUserPart)
+          .filter((part): part is Record<string, unknown> => part !== null);
+        if (content.length > 0) {
+          items.push({ type: "message", role: "user", content });
+        }
+        break;
+      }
+      case "assistant":
+        pushAssistantItems(items, message.content);
+        break;
+      case "tool":
+        for (const part of message.content) {
+          if (part.type !== "tool_result") continue;
+          items.push({
+            type: "function_call_output",
+            call_id: part.callId,
+            output: part.isError
+              ? JSON.stringify({ error: part.result })
+              : typeof part.result === "string"
+                ? part.result
+                : JSON.stringify(part.result),
+          });
+        }
+        break;
+    }
+  }
+  return items;
+}
+
+function convertUserPart(part: ContentPart): Record<string, unknown> | null {
+  switch (part.type) {
+    case "text":
+      return { type: "input_text", text: part.text };
+    case "image":
+      return {
+        type: "input_image",
+        detail: "auto",
+        image_url:
+          part.data instanceof URL
+            ? part.data.href
+            : `data:${part.mimeType};base64,${bytesToBase64(part.data)}`,
+      };
+    default:
+      return null;
+  }
+}
+
+function pushAssistantItems(
+  items: Array<Record<string, unknown>>,
+  content: ContentPart[],
+): void {
+  const texts: string[] = [];
+  const flushText = () => {
+    if (texts.length > 0) {
+      items.push({
+        type: "message",
+        role: "assistant",
+        content: texts.join("\n"),
+      });
+      texts.length = 0;
+    }
+  };
+  for (const part of content) {
+    switch (part.type) {
+      case "text":
+        texts.push(part.text);
+        break;
+      case "tool_call":
+        flushText();
+        items.push({
+          type: "function_call",
+          call_id: part.id,
+          name: part.name,
+          arguments: JSON.stringify(part.args ?? {}),
+        });
+        break;
+      case "thinking":
+        flushText();
+        // replay needs the original item id plus encrypted payload; foreign
+        // or unsigned thinking is dropped
+        if (part.id && part.signature) {
+          items.push({
+            type: "reasoning",
+            id: part.id,
+            summary: part.text
+              ? [{ type: "summary_text", text: part.text }]
+              : [],
+            encrypted_content: part.signature,
+          });
+        }
+        break;
+      default:
+        // images in assistant turns are not representable
+        break;
+    }
+  }
+  flushText();
+}
+
+function convertToolChoice(
+  choice: NonNullable<GenerateOptions["toolChoice"]>,
+): unknown {
+  if (choice === "auto" || choice === "none" || choice === "required")
+    return choice;
+  return { type: "function", name: choice.name };
+}
+
+function convertOutputItem(
+  item: OpenAIItem,
+  content: ContentPart[],
+  provider: string,
+): void {
+  switch (item.type) {
+    case "message": {
+      const blocks = Array.isArray(item.content)
+        ? (item.content as OpenAIItem[])
+        : [];
+      for (const block of blocks) {
+        if (block.type === "output_text") {
+          content.push({ type: "text", text: String(block.text ?? "") });
+        } else if (block.type === "refusal") {
+          content.push({ type: "text", text: String(block.refusal ?? "") });
+        }
+      }
+      break;
+    }
+    case "function_call":
+      content.push({
+        type: "tool_call",
+        id: String(item.call_id ?? ""),
+        name: String(item.name ?? ""),
+        args: parseToolArgs(String(item.arguments ?? ""), provider),
+      });
+      break;
+    case "reasoning": {
+      const part = convertReasoningItem(item);
+      if (part) content.push(part);
+      break;
+    }
+    default:
+      // built-in tool calls (web_search_call, …) stay in `raw` only
+      break;
+  }
+}
+
+function convertReasoningItem(item: OpenAIItem): ThinkingPart | null {
+  const summary = Array.isArray(item.summary)
+    ? (item.summary as Array<{ text?: unknown }>)
+        .map((block) => String(block.text ?? ""))
+        .filter((text) => text.length > 0)
+        .join("\n")
+    : "";
+  const encrypted =
+    typeof item.encrypted_content === "string" &&
+    item.encrypted_content.length > 0
+      ? item.encrypted_content
+      : undefined;
+  if (!summary && !encrypted) return null;
+  return {
+    type: "thinking",
+    text: summary,
+    ...(typeof item.id === "string" && item.id ? { id: item.id } : {}),
+    ...(encrypted ? { signature: encrypted } : {}),
+  };
+}
+
+function deriveFinishReason(raw: OpenAIResponseBody): FinishReason {
+  if (raw.status === "incomplete") {
+    const reason = raw.incomplete_details?.reason;
+    if (reason === "max_output_tokens") return "length";
+    if (reason === "content_filter") return "refusal";
+    return "other";
+  }
+  const output = raw.output ?? [];
+  for (const item of output) {
+    if (item.type !== "message" || !Array.isArray(item.content)) continue;
+    for (const block of item.content as OpenAIItem[]) {
+      if (block.type === "refusal") return "refusal";
+    }
+  }
+  if (output.some((item) => item.type === "function_call")) return "tool_calls";
+  return raw.status === "completed" ? "stop" : "other";
+}
+
+function responseFailure(
+  raw: OpenAIResponseBody,
+  provider: string,
+): CardanError {
+  const code = raw.error?.code;
+  const mapped: ErrorCode =
+    code === "rate_limit_exceeded"
+      ? "rate_limit"
+      : code === "server_error"
+        ? "server"
+        : "unknown";
+  return new CardanError(mapped, raw.error?.message ?? "response failed", {
+    provider,
+    raw,
+    retryable: false,
+  });
+}
+
+function mapUsage(usage: OpenAIUsage | undefined): Usage {
+  const result = emptyUsage();
+  if (!usage) return result;
+  // input_tokens already includes cached tokens
+  result.input.total = usage.input_tokens ?? 0;
+  const cached = usage.input_tokens_details?.cached_tokens;
+  if (cached) result.input.details.cache_read = cached;
+  result.output.total = usage.output_tokens ?? 0;
+  const reasoning = usage.output_tokens_details?.reasoning_tokens;
+  if (reasoning) result.output.details.reasoning = reasoning;
+  return result;
+}
+

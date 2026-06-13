@@ -1,0 +1,165 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import { XAIProvider } from "../src/providers/xai.js";
+import { CardanError, collectStream, createCardan, textMessage } from "../src/index.js";
+
+interface Captured {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+}
+
+function mockFetch(
+  responses: Array<() => Response>,
+  captured: Captured[] = [],
+): typeof globalThis.fetch {
+  let call = 0;
+  return async (input, init) => {
+    captured.push({
+      url: String(input),
+      headers: { ...(init?.headers as Record<string, string>) },
+      body: JSON.parse(String(init?.body)) as Record<string, unknown>,
+    });
+    const next = responses[Math.min(call, responses.length - 1)]!;
+    call++;
+    return next();
+  };
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+const RESPONSE_FIXTURE = {
+  id: "resp_1",
+  object: "response",
+  status: "completed",
+  model: "grok-4.3",
+  output: [
+    {
+      type: "message",
+      id: "msg_1",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text: "hi", annotations: [] }],
+    },
+  ],
+  usage: {
+    input_tokens: 50,
+    input_tokens_details: { cached_tokens: 20 },
+    output_tokens: 10,
+    output_tokens_details: { reasoning_tokens: 3 },
+  },
+};
+
+test("targets api.x.ai with stateless Responses defaults", async () => {
+  const captured: Captured[] = [];
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  const result = await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+  });
+  const request = captured[0]!;
+  assert.equal(request.url, "https://api.x.ai/v1/responses");
+  assert.equal(request.headers.authorization, "Bearer xai-test");
+  assert.equal(request.body.store, false);
+  assert.deepEqual(request.body.include, ["reasoning.encrypted_content"]);
+  assert.deepEqual(result.message.content, [{ type: "text", text: "hi" }]);
+  assert.equal(result.usage.input.total, 50);
+  assert.deepEqual(result.usage.input.details, { cache_read: 20 });
+  assert.deepEqual(result.usage.output.details, { reasoning: 3 });
+});
+
+test("keeps sampling params on reasoning models", async () => {
+  const captured: Captured[] = [];
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+    temperature: 0.5,
+    topP: 0.9,
+  });
+  assert.equal(captured[0]!.body.temperature, 0.5);
+  assert.equal(captured[0]!.body.top_p, 0.9);
+});
+
+test("maps reasoning effort to the xAI range, without summary", async () => {
+  const captured: Captured[] = [];
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  const generate = (reasoning: { enabled?: boolean; effort?: "max" | "medium" }) =>
+    provider.generate({
+      model: "grok-4.3",
+      messages: [textMessage("user", "q")],
+      reasoning,
+    });
+  await generate({ effort: "max" });
+  await generate({ enabled: false });
+  await generate({ enabled: true });
+  assert.deepEqual(captured[0]!.body.reasoning, { effort: "high" });
+  assert.deepEqual(captured[1]!.body.reasoning, { effort: "none" });
+  // no effort requested → provider default; field omitted entirely
+  assert.equal(captured[2]!.body.reasoning, undefined);
+});
+
+test("streams via the shared Responses parser", async () => {
+  const sse = [
+    'data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}\n\n',
+    'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"hm"}\n\n',
+    'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"hm"}],"encrypted_content":"enc_1"}}\n\n',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"yo"}\n\n',
+    'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"yo"}]}],"usage":{"input_tokens":5,"output_tokens":2}}}\n\n',
+  ].join("");
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => new Response(sse, { status: 200 })]),
+  });
+  const result = await collectStream(
+    provider.stream({ model: "grok-4.3", messages: [textMessage("user", "q")] }),
+  );
+  assert.deepEqual(result.message.content, [
+    { type: "thinking", text: "hm", signature: "enc_1", id: "rs_1" },
+    { type: "text", text: "yo" },
+  ]);
+  assert.equal(result.finishReason, "stop");
+  assert.equal(result.usage.input.total, 5);
+});
+
+test("embed reports invalid_request (xAI has no embeddings API)", async () => {
+  const provider = new XAIProvider({ apiKey: "xai-test" });
+  await assert.rejects(
+    provider.embed({ model: "grok-4.3", input: ["a"] }),
+    (error: unknown) =>
+      error instanceof CardanError &&
+      error.code === "invalid_request" &&
+      error.provider === "xai",
+  );
+});
+
+test("Cardan routes xai/ model ids to the xAI provider", async () => {
+  const captured: Captured[] = [];
+  const cardan = createCardan({
+    xai: {
+      apiKey: "xai-test",
+      fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+    },
+  });
+  await cardan.generate({
+    model: "xai/grok-4.3",
+    messages: [textMessage("user", "q")],
+  });
+  assert.equal(captured[0]!.url, "https://api.x.ai/v1/responses");
+  assert.equal(captured[0]!.body.model, "grok-4.3");
+});
