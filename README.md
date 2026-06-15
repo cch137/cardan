@@ -6,7 +6,7 @@ See [DESIGN.md](./DESIGN.md) for goals, non-goals, and provider tiers.
 
 ## Status
 
-0.x — API is unstable until raven/ticks migrate onto it. Implemented: core schema + Anthropic, OpenAI (Responses API), Gemini, xAI, Groq, and Modal (self-deployed, Chat Completions) adapters (generate, streaming, tools, structured output, thinking, vision; OpenAI, Gemini, and Modal also embeddings).
+0.x — API is unstable until raven/ticks migrate onto it. Implemented: core schema + Anthropic, OpenAI (Responses API), Google (Gemini API), xAI, Groq, and Modal (self-deployed, Chat Completions) adapters (generate, streaming, tools, structured output, thinking, vision; OpenAI, Google, and Modal also embeddings).
 
 ## Usage
 

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { GeminiProvider } from "../src/providers/gemini.js";
+import { GoogleProvider } from "../src/providers/google.js";
 import {
   CardanError,
   collectStream,
@@ -59,7 +59,7 @@ const RESPONSE_FIXTURE = {
 
 test("builds request: url, headers, system hoist, tools, toolConfig, generationConfig", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
@@ -116,7 +116,7 @@ test("builds request: url, headers, system hoist, tools, toolConfig, generationC
 
 test("replays tool calls: synthetic ids stripped, real ids and signatures kept", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
@@ -159,7 +159,7 @@ test("replays tool calls: synthetic ids stripped, real ids and signatures kept",
 
 test("tool errors and signed text/thinking parts convert correctly", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
@@ -200,7 +200,7 @@ test("tool errors and signed text/thinking parts convert correctly", async () =>
 
 test("thinking config: gemini-3 level vs gemini-2.5 budget", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
@@ -226,7 +226,7 @@ test("thinking config: gemini-3 level vs gemini-2.5 budget", async () => {
 });
 
 test("parses response: parts, synthetic call id, finish reason, usage", async () => {
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>
@@ -271,7 +271,7 @@ test("parses response: parts, synthetic call id, finish reason, usage", async ()
 });
 
 test("blocked prompt yields refusal with empty message", async () => {
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>
@@ -291,7 +291,7 @@ test("blocked prompt yields refusal with empty message", async () => {
 
 test("structured output sets responseJsonSchema and parses JSON", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch(
       [
@@ -323,7 +323,7 @@ test("structured output sets responseJsonSchema and parses JSON", async () => {
 
 test("maps HTTP errors: context length and RetryInfo retryDelay", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch(
       [
@@ -357,7 +357,7 @@ test("maps HTTP errors: context length and RetryInfo retryDelay", async () => {
   assert.equal(captured.length, 2);
   assert.equal(result.finishReason, "stop");
 
-  const tooLong = new GeminiProvider({
+  const tooLong = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>
@@ -413,7 +413,7 @@ const STREAM_FIXTURE = [
 ].join("");
 
 test("streams: thinking/text deltas, tool call with signature, cumulative usage", async () => {
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>
@@ -449,7 +449,7 @@ test("stream without finishReason raises network error", async () => {
   const sse = `data: ${JSON.stringify({
     candidates: [{ content: { role: "model", parts: [{ text: "partial" }] } }],
   })}\n\n`;
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => new Response(sse, { status: 200 })]),
   });
@@ -488,7 +488,7 @@ function sseFromParts(parts: unknown[]): string {
 }
 
 test("streaming preserves thoughtSignature on text, thought, and function-call parts", async () => {
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>
@@ -515,7 +515,7 @@ test("streaming preserves thoughtSignature on text, thought, and function-call p
 });
 
 test("streaming and non-streaming yield identical signed parts", async () => {
-  const streamProvider = new GeminiProvider({
+  const streamProvider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () => new Response(sseFromParts(SIGNED_PARTS), { status: 200 }),
@@ -525,7 +525,7 @@ test("streaming and non-streaming yield identical signed parts", async () => {
     streamProvider.stream({ model: "gemini-3.5-flash", messages: [textMessage("user", "q")] }),
   );
 
-  const nonStreamProvider = new GeminiProvider({
+  const nonStreamProvider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>
@@ -547,7 +547,7 @@ test("streaming and non-streaming yield identical signed parts", async () => {
 
 test("collected signed message re-serializes into separate signed Parts", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch(
       [
@@ -590,7 +590,7 @@ test("collected signed message re-serializes into separate signed Parts", async 
 
 test("embed: batchEmbedContents request shape and response parsing", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch(
       [() => jsonResponse({ embeddings: [{ values: [0.1, 0.2] }, { values: [0.3] }] })],
@@ -624,7 +624,7 @@ test("embed: batchEmbedContents request shape and response parsing", async () =>
 
 test("image parts: bytes to inlineData, URL to fileData", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
@@ -658,7 +658,7 @@ test("image parts: bytes to inlineData, URL to fileData", async () => {
 
 test("web search: appends the google_search grounding tool", async () => {
   const captured: Captured[] = [];
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
@@ -675,7 +675,7 @@ test("web search: appends the google_search grounding tool", async () => {
 });
 
 test("web search: extracts citations from grounding metadata", async () => {
-  const provider = new GeminiProvider({
+  const provider = new GoogleProvider({
     apiKey: "g-test",
     fetch: mockFetch([
       () =>

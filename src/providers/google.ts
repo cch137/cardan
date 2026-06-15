@@ -36,7 +36,7 @@ import {
   type WebCitation,
 } from "../types.js";
 
-export type GeminiModel =
+export type GoogleModel =
   | "gemini-3.5-flash"
   | "gemini-3.1-pro-preview"
   | "gemini-3.1-flash-lite"
@@ -47,7 +47,7 @@ export type GeminiModel =
   | "gemini-embedding-001"
   | (string & {});
 
-export interface GeminiProviderOptions {
+export interface GoogleProviderOptions {
   /** Defaults to `GEMINI_API_KEY`, falling back to `GOOGLE_API_KEY`. */
   apiKey?: string;
   /** Defaults to `https://generativelanguage.googleapis.com`. */
@@ -121,12 +121,12 @@ interface GeminiResponse {
   promptFeedback?: { blockReason?: string };
 }
 
-export class GeminiProvider implements Provider {
-  readonly name = "gemini";
-  private readonly options: GeminiProviderOptions;
+export class GoogleProvider implements Provider {
+  readonly name = "google";
+  private readonly options: GoogleProviderOptions;
   private readonly fetch: typeof globalThis.fetch;
 
-  constructor(options: GeminiProviderOptions = {}) {
+  constructor(options: GoogleProviderOptions = {}) {
     this.options = options;
     this.fetch = options.fetch ?? globalThis.fetch;
   }

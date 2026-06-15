@@ -5,10 +5,10 @@ import {
   type AnthropicProviderOptions,
 } from "./providers/anthropic.js";
 import {
-  GeminiProvider,
-  type GeminiModel,
-  type GeminiProviderOptions,
-} from "./providers/gemini.js";
+  GoogleProvider,
+  type GoogleModel,
+  type GoogleProviderOptions,
+} from "./providers/google.js";
 import {
   GroqProvider,
   type GroqModel,
@@ -104,10 +104,10 @@ export {
   type AnthropicProviderOptions,
 } from "./providers/anthropic.js";
 export {
-  GeminiProvider,
-  type GeminiModel,
-  type GeminiProviderOptions,
-} from "./providers/gemini.js";
+  GoogleProvider,
+  type GoogleModel,
+  type GoogleProviderOptions,
+} from "./providers/google.js";
 export {
   GroqProvider,
   type GroqModel,
@@ -139,7 +139,7 @@ export {
  */
 export type ModelId =
   | `anthropic/${AnthropicModel}`
-  | `gemini/${GeminiModel}`
+  | `google/${GoogleModel}`
   | `groq/${GroqModel}`
   | `openai/${OpenAIModel}`
   | `xai/${XAIModel}`
@@ -147,7 +147,7 @@ export type ModelId =
 
 export interface CardanConfig {
   anthropic?: AnthropicProviderOptions;
-  gemini?: GeminiProviderOptions;
+  google?: GoogleProviderOptions;
   groq?: GroqProviderOptions;
   /** Self-deployed models on Modal; `baseUrl` is per-deployment. */
   modal?: ModalProviderOptions;
@@ -177,8 +177,8 @@ export class Cardan {
       case "anthropic":
         provider = new AnthropicProvider(this.config.anthropic);
         break;
-      case "gemini":
-        provider = new GeminiProvider(this.config.gemini);
+      case "google":
+        provider = new GoogleProvider(this.config.google);
         break;
       case "groq":
         provider = new GroqProvider(this.config.groq);
