@@ -4,6 +4,14 @@
   "description": "Unified, zero-dependency adapter for major LLM provider APIs",
   "license": "MIT",
   "author": "cch137",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cch137/cardan.git"
+  },
+  "homepage": "https://github.com/cch137/cardan#readme",
+  "bugs": {
+    "url": "https://github.com/cch137/cardan/issues"
+  },
   "keywords": [
     "llm",
     "ai",
