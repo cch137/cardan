@@ -101,7 +101,9 @@ export { collectStream, collectStreamToMessage } from "./stream.js";
 export {
   AnthropicProvider,
   type AnthropicModel,
+  type AnthropicOAuthOptions,
   type AnthropicProviderOptions,
+  type OAuthCredentials,
 } from "./providers/anthropic.js";
 export {
   GoogleProvider,
