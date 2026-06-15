@@ -36,6 +36,7 @@ import type {
   Provider,
   StreamEvent,
 } from "./types.js";
+import { Conversation, type ConversationOptions } from "./conversation.js";
 
 export type {
   ContentPart,
@@ -63,7 +64,38 @@ export type {
 } from "./types.js";
 export { DEFAULT_RETRY, emptyUsage, textMessage } from "./types.js";
 export { CardanError, isCardanError, type ErrorCode } from "./errors.js";
-export type { JsonSchema, SchemaInput, ZodLikeSchema } from "./schema.js";
+export type { Infer, JsonSchema, SchemaInput, ZodLikeSchema } from "./schema.js";
+export {
+  type AskOptions,
+  type CallInfo,
+  type Compactor,
+  Conversation,
+  type ConversationClient,
+  type ConversationOptions,
+  defineTool,
+  dropToolRounds,
+  redactToolResults,
+  type ToolHandler,
+} from "./conversation.js";
+export {
+  createFlow,
+  Flow,
+  type FlowConfig,
+  type FlowCtx,
+  FlowError,
+  type FlowEvent,
+  type Goto,
+  goto,
+  type RunOptions,
+  type Step,
+  type StepResult,
+} from "./flow.js";
+export {
+  type ConversationContext,
+  type ConversationFactory,
+  withConversations,
+} from "./agent.js";
+export { parallel } from "./concurrency.js";
 export { normalizeMessages } from "./normalize.js";
 export { collectStream, collectStreamToMessage } from "./stream.js";
 export {
@@ -175,6 +207,11 @@ export class Cardan {
   stream(options: Prefixed<GenerateOptions>): AsyncIterable<StreamEvent> {
     const { provider, model } = this.route(options.model);
     return provider.stream({ ...options, model });
+  }
+
+  /** Start a stateful {@link Conversation} bound to this client's config. */
+  conversation(options: ConversationOptions): Conversation {
+    return new Conversation(this, options);
   }
 
   embed(options: Prefixed<EmbedOptions>): Promise<EmbedResult> {

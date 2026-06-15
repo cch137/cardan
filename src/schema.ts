@@ -5,14 +5,22 @@ export type JsonSchema = Record<string, unknown>;
 
 /**
  * Minimal structural view of a zod 4 schema. Detection is duck-typed so zod
- * stays an optional peer dependency.
+ * stays an optional peer dependency. The `parse` return type carries the
+ * inferred output, letting {@link Infer} recover it without importing zod.
  */
-export interface ZodLikeSchema {
+export interface ZodLikeSchema<T = unknown> {
   _zod: unknown;
-  parse(data: unknown): unknown;
+  parse(data: unknown): T;
 }
 
 export type SchemaInput = JsonSchema | ZodLikeSchema;
+
+/**
+ * The value type a schema validates to: a zod schema resolves to its parsed
+ * output type; a plain JSON Schema (which carries no static type) resolves to
+ * `unknown`.
+ */
+export type Infer<S> = S extends ZodLikeSchema<infer T> ? T : unknown;
 
 export function isZodSchema(input: SchemaInput): input is ZodLikeSchema {
   return (

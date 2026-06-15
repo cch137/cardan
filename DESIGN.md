@@ -160,3 +160,24 @@ type StreamEvent =
   - Modal — 自部署端點無內置 web search,`webSearch` 直接報 `invalid_request`。
 - **工具迴圈**:OpenAI、Gemini、xAI、Groq 的搜尋迴圈都在 server 端跑完、單一回應回傳成品,呼叫端不需處理。Anthropic 的 server tool 取樣迴圈達上限時以 `stop_reason: "pause_turn"` 中止——adapter 在 `generate` 與 `stream` 都做**透明、有上限(`MAX_SERVER_TOOL_TURNS`)的續跑**:把上一輪 assistant 回合(generate 用 raw blocks、stream 由 SSE 重建 raw blocks)原樣回送以恢復,合併 content/citations、跨輪累加 usage(各請求分別計費,加總即實際帳),對呼叫端呈現為單一回合。
 - **Usage**:Anthropic 的 `server_tool_use.web_search_requests` 映射到 `usage.output.details.web_search_requests`(這是**計費的請求次數,非 token**,以明確命名標示)。
+
+### Conversation(有狀態對話層)
+
+- **定位**:`generate` 是無狀態原語,`Conversation` 是它的有狀態對偶——持有可變 transcript,把「push user → generate → push assistant」折疊成一次 `ask`。放在主 entry,`sideEffects:false` 可 tree-shake,只要 adapter 的人不負擔 runner。不依賴任何 logger,維持零執行期依賴。
+- **統一 config 包**:所有 turn-config 收在單一 `defaults: AskOptions`,`model`/`tools`/`reasoning`… 一視同仁——`model` 不特權化。`ask` 以 spread-merge(`{...defaults, ...callOptions}`)疊加,故可逐 turn 覆寫、可重指派 `defaults.model` 持久切換。預設只放生命週期跟對話一樣長的東西;phase-scoped 的(如某步才用的 tools)按 turn 傳,避免洩漏到該 tool-free 的步驟。
+- **單一入口 `ask`**:無 `tools` 時單次生成;有 `tools`(`ToolHandler[]`)時自動跑 model↔tools 迴圈,`maxRounds` 封頂(預設 8)並在最後一輪強制 `toolChoice:"none"`,保證末訊息不留懸空 tool_call。**`tools` 與 `output` 不可同回合併用**:結構化輸出在各家都是 constrained decoding(`response_format`/`responseSchema`),會封死 tool call 讓迴圈空轉,故 `ask` 直接拋 `invalid_request`——正解是先跑 tool 迴圈、再以單獨一次帶 `output` 的 `ask` 收成結構化結果(README 範例即此兩步式)。
+- **`compact` 是可替換的壓縮器**(`Compactor = (region: Message[]) => Message[]`),迴圈後改寫它附加的往返,避免原始工具輸出(如抓取的頁面)被後續回合重放——既省 context 也避開內容過濾。`compact:true` 用預設 `redactToolResults`:**保留 tool_call/tool_result 結構、只把 result 內容換成佔位字串**——讓模型仍看見「結論是靠工具得出的」,不會誤以為是天生知識(直接 splice 掉整段會造成這種幻覺)。要更激進可用內建 `dropToolRounds`(只留結論)或自寫(如 LLM 摘要);自訂壓縮器需維持 call/result 配對,否則靠 normalize 補懸空結果。
+- **型別貫穿(零依賴)**:`ZodLikeSchema<T>` 的 `parse` 回傳型別承載輸出型別,`Infer<S>` 由此結構性還原而不 import zod。`defineTool(spec, run)` 讓 `run` 的 args 從 schema 推導(zod→具體型別、純 JSON Schema→`unknown`)。結構化輸出只是 `ask` 的 `output.schema` 選項,`res.output` 即解析後的值,要靜態型別自行 `as Infer<typeof schema>`——cardan 是通用模組,不為「輸出 JSON」另設專用方法或假定它是主要用法。
+- **telemetry 解耦**:cardan 自身不 log;`onCall(info)` 每次 generate 觸發一次(成功帶 `finishReason`、失敗帶 `error`),`tag`/`model`/`ms`/`usage`/`citations` 由消費端自訂格式與路由。
+- **`fork(overrides?)`**:複製 transcript(+ defaults)、共用 client,得到可獨立發散的分支對話。並行 fan-out 前必須 fork,否則多分支同時 mutate 同一個 `messages` 會損毀(superstep 對 state 唯讀,但 Conversation 可變)。
+
+### Flow / Agent(編排層)
+
+- **刻意不做圖**:沒有 `edges` 表、沒有 `END` 標記、沒有 node 名稱註冊表——這些都是 LangGraph 的影子。一個 **step 就是 async 函式**,靠回傳 `goto(next, patch?)` 決定下一步,控制流(分支、循環、fan-out)寫在普通程式碼裡。返回不帶 `goto`(或 void/patch)即結束該分支。借的只剩「共享型別 state + superstep 讓並行合併具決定性 + 帶上限循環」;丟掉 checkpointer、Pregel channels、interrupt/HITL、subgraph、reducer 宣告儀式、langchain 耦合。
+- **三層、互不耦合**:`flow.ts`(泛型 async step 執行器,完全不認得 LLM)、`conversation.ts`(完全不認得 flow)、`agent.ts`(唯一同時認得兩者的薄膠水)。`flow.ts` 只在 `extendCtx` 開一個擴充縫——核心只 `Object.assign` 擴充物件進 ctx,不知道 `conversation` 是什麼;`withConversations(cardan)` 由膠水層供應,把 `ctx.conversation(...)` 的 `onCall` 自動轉為 `{type:"llm", name, iteration, call}` flow 事件。純 flow 使用者 `X=unknown`,零負擔。
+- **執行 = BSP superstep**:維護 frontier(step 函式集合);每 superstep 對「同一份 state 快照」並行跑,蒐集 `Partial<S>` patches,在 barrier 用 reducer 合併,再從各 step 的 `goto.next` 算下個 frontier(以**函式參照**去重)。**`goto` 同一函式的分支自動 join**(跑一次)。不等長分支的真同步刻意不做——那種並行收進「step 內 `parallel()`」處理(這是讓執行器保持小的關鍵取捨)。去重/join 用**函式參照**(`Set<Step>`)而非名稱,故 minify 改名不影響收斂正確性。
+- **fail-fast 且喚醒兄弟**:同 superstep 的 step 用 `Promise.all`,任一拋錯即拒絕整個 run;執行器以內部 `AbortController` 在拋錯當下 abort,讓**仍在飛的兄弟 step**經 `ctx.signal` 收到中止(它們 spawn 的 conversation / `parallel()` 才能取消),而非白跑到底。呼叫端的 `signal` 也併入這個 composed signal,故 step 只需認一個 `ctx.signal`。
+- **決定性合併**:每個被寫的 key,單寫入=覆寫(或有 reducer 就 fold);**多個並行 step 寫同一 key 但沒宣告 reducer → 直接拋 `FlowError`**,把不確定性在執行期擋下而非靜默 last-write-wins。
+- **路由即程式碼**:沒有 router/edge 概念。`goto(next, patch?)` 繼續、`goto([a,b], patch?)` fan-out、回傳 patch/void 停止;循環 = step `goto` 自己,條件路由 = `if` 選下一個 step。step 身分(tracing 用)取自函式名(匿名 → `"(anonymous)"`);這只影響事件標籤,minify 後會退化成短名,**不影響去重/join**(用參照)。
+- **循環安全**:`maxSteps`(預設 25)封頂 superstep 數,超過拋 `FlowError`;state 為純物件,要持久化自行序列化(checkpoint/resume 不內建)。
+- **`parallel(items, fn, {concurrency, signal})`**:泛型限流並行 map(零 LLM/flow 依賴),保序、fail-fast、可中止。step 內 fan-out 的主力,只有「分支有不同後續路由」時才改用 step 層 fan-out。
