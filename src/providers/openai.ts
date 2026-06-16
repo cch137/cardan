@@ -1,6 +1,7 @@
 import {
   CardanError,
   codeFromStatus,
+  isCardanError,
   parseRetryAfter,
   wrapFetchError,
   type ErrorCode,
@@ -8,7 +9,7 @@ import {
 import { readEnv } from "../env.js";
 import { normalizeMessages, partsToText } from "../normalize.js";
 import { parseSse } from "../sse.js";
-import { resolveRetry, withRetry } from "../retry.js";
+import { delay, resolveRetry, withRetry } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
   addCitations,
@@ -38,21 +39,11 @@ import {
 
 export type OpenAIModel =
   | "gpt-5.5"
+  | "gpt-5.5-pro"
   | "gpt-5.4"
   | "gpt-5.4-mini"
   | "gpt-5.4-nano"
-  | "gpt-5.2"
-  | "gpt-5.2-pro"
-  | "gpt-5.1"
-  | "gpt-5.1-codex"
-  | "gpt-5"
-  | "gpt-5-mini"
-  | "gpt-5-nano"
-  | "gpt-4.1"
-  | "gpt-4.1-mini"
-  | "gpt-4.1-nano"
-  | "gpt-4o"
-  | "gpt-4o-mini"
+  | "gpt-5.3-codex"
   | "o3"
   | "o4-mini"
   | "text-embedding-3-small"
@@ -86,6 +77,15 @@ const EFFORT_MAP: Record<ReasoningEffort, string> = {
   max: "xhigh",
 };
 
+/** Reasoning efforts that auto-enable background mode (long generations). */
+const BACKGROUND_EFFORTS = new Set<ReasoningEffort>(["high", "xhigh", "max"]);
+
+/** Delay between background poll/retrieve requests. */
+const BACKGROUND_POLL_MS = 1000;
+
+/** Cap on SSE reconnects for a single background stream before giving up. */
+const MAX_STREAM_RESUMES = 50;
+
 interface OpenAIItem {
   type?: string;
   [key: string]: unknown;
@@ -99,6 +99,7 @@ interface OpenAIUsage {
 }
 
 export interface OpenAIResponseBody {
+  id?: string;
   status?: string;
   output?: OpenAIItem[];
   usage?: OpenAIUsage;
@@ -145,13 +146,22 @@ export class OpenAIProvider implements Provider {
       retry,
       options.signal,
     );
-    const raw = (await response.json()) as OpenAIResponseBody;
+    let raw = (await response.json()) as OpenAIResponseBody;
+    if (body.background === true) {
+      // background returns immediately while the model runs server-side;
+      // poll until the response reaches a terminal state
+      raw = await this.pollBackground(raw, options.signal, retry);
+    }
     return this.parseResponse(raw, options);
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const body = await this.buildRequestBody(options, true);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    if (body.background === true) {
+      yield* this.streamBackground(body, options, retry);
+      return;
+    }
     const response = await withRetry(
       () => this.request("/v1/responses", body, options.signal),
       retry,
@@ -221,6 +231,30 @@ export class OpenAIProvider implements Provider {
           ...this.options.headers,
         },
         body: JSON.stringify(body),
+        signal: signal ?? null,
+      });
+    } catch (error) {
+      throw wrapFetchError(error, this.name);
+    }
+    if (!response.ok) {
+      throw await this.httpError(response);
+    }
+    return response;
+  }
+
+  private async requestGet(
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    const url = `${this.options.baseUrl ?? this.defaultBaseUrl}${path}`;
+    let response: Response;
+    try {
+      response = await this.fetch(url, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${this.apiKey()}`,
+          ...this.options.headers,
+        },
         signal: signal ?? null,
       });
     } catch (error) {
@@ -329,13 +363,37 @@ export class OpenAIProvider implements Provider {
       const reasoning = this.convertReasoning(options.reasoning);
       if (reasoning) body.reasoning = reasoning;
     }
+    if (this.resolveBackground(options)) {
+      // background decouples execution from the connection; it requires
+      // server-side storage so the response can be polled / the stream resumed
+      body.background = true;
+      body.store = true;
+    }
 
     if (options.providerOptions) Object.assign(body, options.providerOptions);
-    if (body.store === false && body.include === undefined) {
-      // encrypted reasoning items make thinking replayable across stateless turns
+    if (
+      body.include === undefined &&
+      (body.store === false || body.background === true)
+    ) {
+      // encrypted reasoning items keep thinking replayable from `messages`,
+      // both for stateless turns and across a polled/resumed background run
       body.include = ["reasoning.encrypted_content"];
     }
     return body;
+  }
+
+  /**
+   * Resolves whether to run in background mode: explicit `background` wins;
+   * otherwise auto-enable for high-effort reasoning (`high`/`xhigh`/`max`),
+   * whose long generations are the ones at risk of idle-connection drops.
+   */
+  protected resolveBackground(options: GenerateOptions): boolean {
+    if (options.background !== undefined) return options.background;
+    const reasoning = options.reasoning;
+    if (!reasoning || reasoning.enabled === false || !reasoning.effort) {
+      return false;
+    }
+    return BACKGROUND_EFFORTS.has(reasoning.effort);
   }
 
   // -------------------------------------------------------------------------
@@ -345,7 +403,7 @@ export class OpenAIProvider implements Provider {
   /**
    * Reasoning models reject sampling parameters (`temperature`, `top_p`); the
    * adapter drops them instead of failing the request. The `*chat*` variants
-   * (e.g. `gpt-5-chat-latest`) are non-reasoning and keep them.
+   * (e.g. `gpt-5.5-chat-latest`) are non-reasoning and keep them.
    */
   protected supportsSamplingParams(model: string): boolean {
     if (/^(o[0-9]|codex)/.test(model)) return false;
@@ -468,73 +526,230 @@ export class OpenAIProvider implements Provider {
       } catch {
         continue;
       }
-      switch (event.type) {
-        case "response.output_text.delta":
-        // refusal text surfaces as text; the finish event carries the reason
-        case "response.refusal.delta":
-          yield { type: "text_delta", text: String(event.delta ?? "") };
-          break;
-        case "response.reasoning_summary_text.delta":
-        case "response.reasoning_text.delta":
-          yield { type: "thinking_delta", text: String(event.delta ?? "") };
-          break;
-        case "response.output_item.done": {
-          const item = event.item as OpenAIItem | undefined;
-          if (item?.type === "function_call") {
-            yield {
-              type: "tool_call",
-              id: String(item.call_id ?? ""),
-              name: String(item.name ?? ""),
-              args: parseToolArgs(String(item.arguments ?? ""), this.name),
-            };
-          } else if (
-            item?.type === "reasoning" &&
-            typeof item.encrypted_content === "string" &&
-            item.encrypted_content
-          ) {
-            yield {
-              type: "thinking_signature",
-              signature: item.encrypted_content,
-              ...(typeof item.id === "string" && item.id
-                ? { id: item.id }
-                : {}),
-            };
-          }
-          break;
-        }
-        case "response.completed":
-        case "response.incomplete": {
-          const response = (event.response ?? {}) as OpenAIResponseBody;
-          const citations = this.extractCitations(response);
-          yield {
-            type: "finish",
-            reason: deriveFinishReason(response),
-            usage: mapUsage(response.usage),
-            ...(citations.length ? { citations } : {}),
-          };
-          return;
-        }
-        case "response.failed":
-          throw responseFailure(
-            (event.response ?? {}) as OpenAIResponseBody,
-            this.name,
-          );
-        case "error":
-          throw new CardanError(
-            "server",
-            String(event.message ?? "stream error"),
-            {
-              provider: this.name,
-              raw: event,
-              retryable: false,
-            },
-          );
-      }
+      const mapped = this.mapStreamEvent(event);
+      yield* mapped.events;
+      if (mapped.done) return;
     }
     // stream ended without response.completed (connection cut)
     throw new CardanError("network", "stream ended unexpectedly", {
       provider: this.name,
     });
+  }
+
+  /**
+   * Maps one parsed SSE event to zero or more {@link StreamEvent}s; `done` is
+   * set once the terminal `response.completed`/`response.incomplete` arrives.
+   * Throws on `response.failed`/`error`. Shared by the plain and background
+   * streaming paths.
+   */
+  private mapStreamEvent(event: Record<string, unknown>): {
+    events: StreamEvent[];
+    done: boolean;
+  } {
+    switch (event.type) {
+      case "response.output_text.delta":
+      // refusal text surfaces as text; the finish event carries the reason
+      case "response.refusal.delta":
+        return {
+          events: [{ type: "text_delta", text: String(event.delta ?? "") }],
+          done: false,
+        };
+      case "response.reasoning_summary_text.delta":
+      case "response.reasoning_text.delta":
+        return {
+          events: [{ type: "thinking_delta", text: String(event.delta ?? "") }],
+          done: false,
+        };
+      case "response.output_item.done": {
+        const item = event.item as OpenAIItem | undefined;
+        if (item?.type === "function_call") {
+          return {
+            events: [
+              {
+                type: "tool_call",
+                id: String(item.call_id ?? ""),
+                name: String(item.name ?? ""),
+                args: parseToolArgs(String(item.arguments ?? ""), this.name),
+              },
+            ],
+            done: false,
+          };
+        }
+        if (
+          item?.type === "reasoning" &&
+          typeof item.encrypted_content === "string" &&
+          item.encrypted_content
+        ) {
+          return {
+            events: [
+              {
+                type: "thinking_signature",
+                signature: item.encrypted_content,
+                ...(typeof item.id === "string" && item.id
+                  ? { id: item.id }
+                  : {}),
+              },
+            ],
+            done: false,
+          };
+        }
+        return { events: [], done: false };
+      }
+      case "response.completed":
+      case "response.incomplete": {
+        const response = (event.response ?? {}) as OpenAIResponseBody;
+        const citations = this.extractCitations(response);
+        return {
+          events: [
+            {
+              type: "finish",
+              reason: deriveFinishReason(response),
+              usage: mapUsage(response.usage),
+              ...(citations.length ? { citations } : {}),
+            },
+          ],
+          done: true,
+        };
+      }
+      case "response.failed":
+        throw responseFailure(
+          (event.response ?? {}) as OpenAIResponseBody,
+          this.name,
+        );
+      case "error":
+        throw new CardanError("server", String(event.message ?? "stream error"), {
+          provider: this.name,
+          raw: event,
+          retryable: false,
+        });
+      default:
+        return { events: [], done: false };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Background mode (OpenAI / xAI Responses)
+  // -------------------------------------------------------------------------
+
+  /** Polls a background response until it leaves `queued`/`in_progress`. */
+  private async pollBackground(
+    initial: OpenAIResponseBody,
+    signal: AbortSignal | undefined,
+    retry: RetryOptions,
+  ): Promise<OpenAIResponseBody> {
+    let raw = initial;
+    while (raw.status === "queued" || raw.status === "in_progress") {
+      if (!raw.id) {
+        throw new CardanError(
+          "server",
+          "background response is missing an id",
+          { provider: this.name, raw },
+        );
+      }
+      await delay(BACKGROUND_POLL_MS, signal);
+      const id = raw.id;
+      const response = await withRetry(
+        () => this.requestGet(`/v1/responses/${id}`, signal),
+        retry,
+        signal,
+      );
+      raw = (await response.json()) as OpenAIResponseBody;
+    }
+    return raw;
+  }
+
+  /**
+   * Streams a background response, transparently reconnecting a dropped SSE via
+   * `GET /v1/responses/{id}?stream=true&starting_after=<sequence_number>` so a
+   * cut connection no longer fails the whole run. The caller's `signal` bounds
+   * the total time and is honored as a hard stop (no resume after abort).
+   */
+  private async *streamBackground(
+    body: Record<string, unknown>,
+    options: GenerateOptions,
+    retry: RetryOptions,
+  ): AsyncGenerator<StreamEvent> {
+    const { signal } = options;
+    let responseId: string | undefined;
+    let lastSeq: number | undefined;
+    let resumes = 0;
+    let stream = await this.openStream(
+      () => this.request("/v1/responses", body, signal),
+      retry,
+      signal,
+    );
+    for (;;) {
+      let done = false;
+      try {
+        for await (const { data } of parseSse(stream)) {
+          let event: Record<string, unknown>;
+          try {
+            event = JSON.parse(data) as Record<string, unknown>;
+          } catch {
+            continue;
+          }
+          if (typeof event.sequence_number === "number") {
+            lastSeq = event.sequence_number;
+          }
+          const response = event.response as { id?: string } | undefined;
+          if (typeof response?.id === "string") responseId = response.id;
+          const mapped = this.mapStreamEvent(event);
+          yield* mapped.events;
+          if (mapped.done) {
+            done = true;
+            break;
+          }
+        }
+      } catch (error) {
+        if (signal?.aborted || !this.canResume(error)) throw error;
+      }
+      if (done) return;
+      // the SSE ended (cleanly or by a drop) before completion: resume it
+      if (!responseId) {
+        throw new CardanError("network", "stream ended unexpectedly", {
+          provider: this.name,
+        });
+      }
+      if (++resumes > MAX_STREAM_RESUMES) {
+        throw new CardanError(
+          "network",
+          "exceeded background stream resume limit",
+          { provider: this.name },
+        );
+      }
+      const cursor = lastSeq ?? 0;
+      stream = await this.openStream(
+        () =>
+          this.requestGet(
+            `/v1/responses/${responseId}?stream=true&starting_after=${cursor}`,
+            signal,
+          ),
+        retry,
+        signal,
+      );
+    }
+  }
+
+  /** Opens an SSE request and returns its body, retrying like other requests. */
+  private async openStream(
+    fn: () => Promise<Response>,
+    retry: RetryOptions,
+    signal: AbortSignal | undefined,
+  ): Promise<ReadableStream<Uint8Array>> {
+    const response = await withRetry(fn, retry, signal);
+    if (!response.body) {
+      throw new CardanError("network", "response has no body", {
+        provider: this.name,
+      });
+    }
+    return response.body;
+  }
+
+  /** A mid-stream failure is resumable only when it's a connection drop. */
+  private canResume(error: unknown): boolean {
+    // raw read errors (connection reset) aren't CardanErrors; network-coded
+    // CardanErrors are drops too. Auth/server/aborted errors are not resumable.
+    return isCardanError(error) ? error.code === "network" : true;
   }
 }
 

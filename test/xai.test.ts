@@ -254,3 +254,39 @@ test("web search: reads both annotations and top-level citations", async () => {
     { url: "https://c.com", title: "C" },
   ]);
 });
+
+test("background: high effort auto-enables background + store and polls", async () => {
+  const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+  let i = 0;
+  const handlers = [
+    () => jsonResponse({ id: "resp_bg", status: "queued" }),
+    () => jsonResponse({ ...RESPONSE_FIXTURE, id: "resp_bg" }),
+  ];
+  const fetch = (async (input: unknown, init?: RequestInit) => {
+    let body: Record<string, unknown> | undefined;
+    if (init?.body) {
+      try {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      } catch {
+        body = undefined;
+      }
+    }
+    calls.push({ url: String(input), method: init?.method ?? "GET", body });
+    const handler = handlers[Math.min(i, handlers.length - 1)]!;
+    i++;
+    return handler();
+  }) as unknown as typeof globalThis.fetch;
+
+  const provider = new XAIProvider({ apiKey: "xai-test", fetch });
+  await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+    reasoning: { effort: "high" },
+  });
+  assert.equal(calls[0]!.method, "POST");
+  assert.equal(calls[0]!.url, "https://api.x.ai/v1/responses");
+  assert.equal(calls[0]!.body!.background, true);
+  assert.equal(calls[0]!.body!.store, true);
+  assert.equal(calls[1]!.method, "GET");
+  assert.equal(calls[1]!.url, "https://api.x.ai/v1/responses/resp_bg");
+});

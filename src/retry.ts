@@ -8,7 +8,7 @@ export function resolveRetry(
   return { ...DEFAULT_RETRY, ...retry };
 }
 
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
+export function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new CardanError("aborted", "request aborted"));

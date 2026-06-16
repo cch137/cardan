@@ -54,7 +54,7 @@ const RESPONSE_FIXTURE = {
     cachedContentTokenCount: 40,
     totalTokenCount: 112,
   },
-  modelVersion: "gemini-2.5-flash",
+  modelVersion: "gemini-3.5-flash",
 };
 
 test("builds request: url, headers, system hoist, tools, toolConfig, generationConfig", async () => {
@@ -72,7 +72,7 @@ test("builds request: url, headers, system hoist, tools, toolConfig, generationC
   ];
 
   await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages,
     temperature: 0.5,
     maxOutputTokens: 1000,
@@ -84,7 +84,7 @@ test("builds request: url, headers, system hoist, tools, toolConfig, generationC
   const request = captured[0]!;
   assert.equal(
     request.url,
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
   );
   assert.equal(request.headers["x-goog-api-key"], "g-test");
 
@@ -249,7 +249,7 @@ test("parses response: parts, synthetic call id, finish reason, usage", async ()
     ]),
   });
   const result = await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "q")],
   });
 
@@ -282,7 +282,7 @@ test("blocked prompt yields refusal with empty message", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "q")],
   });
   assert.equal(result.finishReason, "refusal");
@@ -311,7 +311,7 @@ test("structured output sets responseJsonSchema and parses JSON", async () => {
   });
   const schema = { type: "object", properties: { name: { type: "string" } } };
   const result = await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "extract")],
     output: { schema },
   });
@@ -350,7 +350,7 @@ test("maps HTTP errors: context length and RetryInfo retryDelay", async () => {
     ),
   });
   const result = await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "q")],
     retry: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 5 },
   });
@@ -374,7 +374,7 @@ test("maps HTTP errors: context length and RetryInfo retryDelay", async () => {
     ]),
   });
   await assert.rejects(
-    tooLong.generate({ model: "gemini-2.5-flash", messages: [textMessage("user", "q")] }),
+    tooLong.generate({ model: "gemini-3.5-flash", messages: [textMessage("user", "q")] }),
     (error: unknown) =>
       error instanceof CardanError && error.code === "context_length" && error.status === 400,
   );
@@ -424,7 +424,7 @@ test("streams: thinking/text deltas, tool call with signature, cumulative usage"
     ]),
   });
   const stream = provider.stream({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "q")],
   });
   const result = await collectStream(stream);
@@ -455,7 +455,7 @@ test("stream without finishReason raises network error", async () => {
   });
   await assert.rejects(
     collectStream(
-      provider.stream({ model: "gemini-2.5-flash", messages: [textMessage("user", "q")] }),
+      provider.stream({ model: "gemini-3.5-flash", messages: [textMessage("user", "q")] }),
     ),
     (error: unknown) => error instanceof CardanError && error.code === "network",
   );
@@ -629,7 +629,7 @@ test("image parts: bytes to inlineData, URL to fileData", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [
       {
         role: "user",
@@ -663,7 +663,7 @@ test("web search: appends the google_search grounding tool", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "q")],
     tools: [{ name: "f", parameters: { type: "object" } }],
     webSearch: true,
@@ -697,7 +697,7 @@ test("web search: extracts citations from grounding metadata", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.5-flash",
     messages: [textMessage("user", "q")],
     webSearch: true,
   });

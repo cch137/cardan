@@ -39,7 +39,7 @@ const RESPONSE_FIXTURE = {
   id: "resp_1",
   object: "response",
   status: "completed",
-  model: "gpt-5.2",
+  model: "gpt-5.5",
   output: [
     {
       type: "message",
@@ -83,7 +83,7 @@ test("builds request: input items, tool replay, defaults, headers", async () => 
   ];
 
   await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages,
     maxOutputTokens: 2000,
     tools: [{ name: "f", description: "d", parameters: { type: "object" } }],
@@ -125,21 +125,21 @@ test("builds request: input items, tool replay, defaults, headers", async () => 
   ]);
 });
 
-test("drops sampling params on reasoning models, keeps them on gpt-4.1", async () => {
+test("drops sampling params on reasoning models, keeps them on chat models", async () => {
   const captured: Captured[] = [];
   const provider = new OpenAIProvider({
     apiKey: "sk-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     temperature: 0.5,
     topP: 0.9,
     reasoning: { enabled: true, effort: "max" },
   });
   await provider.generate({
-    model: "gpt-4.1",
+    model: "gpt-5.5-chat-latest",
     messages: [textMessage("user", "q")],
     temperature: 0.5,
   });
@@ -156,7 +156,7 @@ test("thinking parts without id or signature are not replayed", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [
       textMessage("user", "q"),
       {
@@ -204,7 +204,7 @@ test("parses response: parts, finish reason, usage details", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
   });
   assert.deepEqual(result.message.content, [
@@ -232,7 +232,7 @@ test("incomplete response maps to length finish reason", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
   });
   assert.equal(result.finishReason, "length");
@@ -256,7 +256,7 @@ test("maps HTTP errors and detects context length", async () => {
     ),
   });
   const result = await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     retry: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 5 },
   });
@@ -279,7 +279,7 @@ test("maps HTTP errors and detects context length", async () => {
     ]),
   });
   await assert.rejects(
-    failing.generate({ model: "gpt-5.2", messages: [textMessage("user", "q")] }),
+    failing.generate({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
     (error: unknown) =>
       error instanceof CardanError &&
       error.code === "context_length" &&
@@ -316,7 +316,7 @@ test("streams: deltas, reasoning signature with id, tool calls, finish usage", a
     ]),
   });
   const result = await collectStream(
-    provider.stream({ model: "gpt-5.2", messages: [textMessage("user", "q")] }),
+    provider.stream({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
   );
   assert.deepEqual(result.message.content, [
     { type: "thinking", text: "hmm", signature: "enc_1", id: "rs_1" },
@@ -339,7 +339,7 @@ test("stream failure events raise CardanError", async () => {
   });
   await assert.rejects(
     collectStream(
-      provider.stream({ model: "gpt-5.2", messages: [textMessage("user", "q")] }),
+      provider.stream({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
     ),
     (error: unknown) => error instanceof CardanError && error.code === "server",
   );
@@ -369,7 +369,7 @@ test("structured output sets text.format and parses JSON", async () => {
   });
   const schema = { type: "object", properties: { name: { type: "string" } } };
   const result = await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "extract")],
     output: { schema },
   });
@@ -408,7 +408,7 @@ test("structured output picks the final part when a reasoning model emits drafts
   });
   const schema = { type: "object", properties: { name: { type: "string" } } };
   const result = await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "extract")],
     output: { schema },
   });
@@ -434,7 +434,7 @@ test("refusal content maps to refusal finish reason", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.2",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     output: { schema: { type: "object" } },
   });
@@ -557,4 +557,146 @@ test("web search: extracts url_citation annotations", async () => {
   });
   assert.deepEqual(result.message.content, [{ type: "text", text: "answer" }]);
   assert.deepEqual(result.citations, [{ url: "https://a.com", title: "A" }]);
+});
+
+// ---------------------------------------------------------------------------
+// Background mode
+// ---------------------------------------------------------------------------
+
+interface SeqCall {
+  url: string;
+  method: string;
+  body?: Record<string, unknown>;
+}
+
+function mockFetchSeq(handlers: Array<() => Response>): {
+  fetch: typeof globalThis.fetch;
+  calls: SeqCall[];
+} {
+  const calls: SeqCall[] = [];
+  let i = 0;
+  const fetch = (async (input: unknown, init?: RequestInit) => {
+    let body: Record<string, unknown> | undefined;
+    if (init?.body) {
+      try {
+        body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      } catch {
+        body = undefined;
+      }
+    }
+    calls.push({ url: String(input), method: init?.method ?? "GET", body });
+    const handler = handlers[Math.min(i, handlers.length - 1)]!;
+    i++;
+    return handler();
+  }) as unknown as typeof globalThis.fetch;
+  return { fetch, calls };
+}
+
+function sse(...events: Array<Record<string, unknown>>): Response {
+  return new Response(
+    events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(""),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+}
+
+test("background: high effort auto-enables background + store and polls", async () => {
+  const { fetch, calls } = mockFetchSeq([
+    () => jsonResponse({ id: "resp_bg", status: "queued" }),
+    () => jsonResponse({ id: "resp_bg", status: "in_progress" }),
+    () => jsonResponse({ ...RESPONSE_FIXTURE, id: "resp_bg" }),
+  ]);
+  const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
+  const result = await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    reasoning: { effort: "high" },
+  });
+  assert.equal(calls[0]!.method, "POST");
+  assert.equal(calls[0]!.body!.background, true);
+  assert.equal(calls[0]!.body!.store, true);
+  assert.equal(calls[1]!.method, "GET");
+  assert.equal(calls[1]!.url, "https://api.openai.com/v1/responses/resp_bg");
+  assert.equal(calls[2]!.url, "https://api.openai.com/v1/responses/resp_bg");
+  assert.deepEqual(result.message.content, [{ type: "text", text: "hi" }]);
+});
+
+test("background: low effort stays in the foreground (no background/store)", async () => {
+  const { fetch, calls } = mockFetchSeq([() => jsonResponse(RESPONSE_FIXTURE)]);
+  const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
+  await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    reasoning: { effort: "low" },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.body!.background, undefined);
+  assert.equal(calls[0]!.body!.store, false);
+});
+
+test("background: explicit false overrides high-effort auto", async () => {
+  const { fetch, calls } = mockFetchSeq([() => jsonResponse(RESPONSE_FIXTURE)]);
+  const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
+  await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    reasoning: { effort: "max" },
+    background: false,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.body!.background, undefined);
+  assert.equal(calls[0]!.body!.store, false);
+});
+
+test("background: explicit true enables without reasoning", async () => {
+  const { fetch, calls } = mockFetchSeq([() => jsonResponse(RESPONSE_FIXTURE)]);
+  const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
+  await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    background: true,
+  });
+  assert.equal(calls[0]!.body!.background, true);
+  assert.equal(calls[0]!.body!.store, true);
+});
+
+test("background: stream resumes a dropped SSE via starting_after", async () => {
+  const { fetch, calls } = mockFetchSeq([
+    // POST opens the stream, then the connection drops after "he"
+    () =>
+      sse(
+        { type: "response.created", sequence_number: 0, response: { id: "resp_s" } },
+        { type: "response.output_text.delta", sequence_number: 1, delta: "he" },
+      ),
+    // GET resumes from the last sequence number and completes
+    () =>
+      sse(
+        { type: "response.output_text.delta", sequence_number: 2, delta: "llo" },
+        {
+          type: "response.completed",
+          sequence_number: 3,
+          response: {
+            status: "completed",
+            usage: { input_tokens: 1, output_tokens: 1 },
+          },
+        },
+      ),
+  ]);
+  const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
+  const result = await collectStream(
+    provider.stream({
+      model: "gpt-5.5",
+      messages: [textMessage("user", "q")],
+      background: true,
+    }),
+  );
+  assert.equal(calls[0]!.method, "POST");
+  assert.equal(calls[0]!.body!.background, true);
+  assert.equal(calls[0]!.body!.stream, true);
+  assert.equal(calls[1]!.method, "GET");
+  assert.equal(
+    calls[1]!.url,
+    "https://api.openai.com/v1/responses/resp_s?stream=true&starting_after=1",
+  );
+  assert.deepEqual(result.message.content, [{ type: "text", text: "hello" }]);
+  assert.equal(result.finishReason, "stop");
 });

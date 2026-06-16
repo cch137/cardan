@@ -20,8 +20,6 @@ export type XAIModel =
   | "grok-4-fast-non-reasoning"
   | "grok-4-0709"
   | "grok-code-fast-1"
-  | "grok-3"
-  | "grok-3-mini"
   | (string & {});
 
 export interface XAIProviderOptions {
@@ -67,6 +65,10 @@ const MAX_SEARCH_DOMAINS = 5;
  *   detailed reasoning summaries for reasoning models.
  * - grok models accept `temperature`/`top_p` even when reasoning.
  * - xAI offers no embeddings API; `embed` throws `invalid_request`.
+ * - background mode is inherited: xAI's Responses API takes the same
+ *   `background`/`store` parameters and `GET /v1/responses/{id}` retrieval, so
+ *   high-effort requests auto-run in background (poll on `generate`, resume on
+ *   `stream`) exactly like OpenAI.
  */
 export class XAIProvider extends OpenAIProvider {
   override readonly name: string = "xai";

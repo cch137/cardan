@@ -229,6 +229,16 @@ export interface GenerateOptions {
    */
   reasoning?: { enabled?: boolean; effort?: ReasoningEffort };
   /**
+   * Run the request in the provider's background mode (OpenAI / xAI Responses
+   * only; ignored by other adapters). `undefined` (default) auto-enables it
+   * for high-effort reasoning (`high`/`xhigh`/`max`), where long generations
+   * risk idle-connection drops; `true`/`false` force it on/off. Background
+   * decouples execution from the HTTP connection (and forces `store: true`):
+   * `generate` creates the response then polls it to completion, `stream`
+   * resumes a dropped SSE via `starting_after` instead of failing.
+   */
+  background?: boolean;
+  /**
    * Provider-specific request fields, shallow-merged into the outgoing
    * request body last (escape hatch; overrides adapter defaults).
    */

@@ -104,7 +104,7 @@ type StreamEvent =
 - **ESM only**,TypeScript 編譯產出 `dist/`(tsdown),`exports` 單一入口;供應商 adapter 是否拆 subpath exports(`cardan/anthropic`)待 API 成形後決定。
 - **認證**:API key 由呼叫方顯式傳入,也支援讀取各供應商慣例的環境變數;cardan 不做任何 key 的儲存或管理。
 - **重試**:預設對 429/5xx/網路錯誤做有上限的指數退避,可關閉;timeout 與取消用 `AbortSignal`。
-- **模型識別與路由**:統一入口用 `provider/model` 字串(如 `openai/gpt-5.5`),由入口解析後直接路由到對應 adapter。解析規則定死為**只切第一個 `/`**:前段是 provider,其餘原樣傳給供應商(模型名本身可能含 `/`,如 `groq/meta-llama/llama-4-scout`)。per-provider adapter 直接收不帶前綴的模型名。不 hard-code 封閉的模型集合(維護成本高、落後上游);型別層用 template literal + `(string & {})` 提供已知模型的 autocomplete。
+- **模型識別與路由**:統一入口用 `provider/model` 字串(如 `openai/gpt-5.5`),由入口解析後直接路由到對應 adapter。解析規則定死為**只切第一個 `/`**:前段是 provider,其餘原樣傳給供應商(模型名本身可能含 `/`,如 `groq/meta-llama/llama-4-scout`)。per-provider adapter 直接收不帶前綴的模型名。不 hard-code 封閉的模型集合(維護成本高、落後上游);型別層用 template literal + `(string & {})` 提供已知模型的 autocomplete。**autocomplete 清單只列前沿模型**:同價位若已有更好的替代品,舊型號預設淘汰、不列入(`(string & {})` 仍接受任何字串,僅是不再提示);測試同步只用前沿模型,唯獨刻意驗證「能力缺失」的負向測試保留不具該能力的舊模型作 fixture。
 - **zod 支援**:zod 是 optional peerDependency(`zod@^4`)。tools 與 structured output 的 schema 參數接受純 JSON Schema 物件或 zod schema;zod schema 用其實例方法 `.parse()` 驗證回應、用 zod 4 原生 `z.toJSONSchema` 轉換(動態 import,僅在呼叫方實際傳入 zod schema 時觸發)。cardan 內部解析供應商回應不用 zod,維持 TypeScript 型別 + 防禦性解析。
 - **測試**:核心轉換邏輯(message/usage/stream 的雙向映射、訊息序列正規化)用 fixture 單元測試;對真實 API 的 smoke test 獨立成手動執行的腳本,不進 CI。
 
@@ -145,6 +145,18 @@ type StreamEvent =
 - Groq structured output:`response_format.json_schema` 的 `strict: true`(constrained decoding)僅 gpt-oss 支援,能力表閘控;其他模型走 best-effort(不帶 strict 旗標,zod schema 仍由 client 端驗證)。不支援 json_schema 的模型(llama-3.x)由 Groq 直接報錯。
 - Groq streaming usage 在 `finish_reason` chunk 上(頂層 `usage` 與 `x_groq.usage` 皆有,免 `stream_options`),終止符 `data: [DONE]`;tool call 以 `index` 聚合,id(`fc_…`)原樣保留。prompt caching 全自動,`prompt_tokens_details.cached_tokens`→`cache_read`。413(request_too_large)映射 `context_length`。
 - Groq 送 `max_completion_tokens`;無 embeddings API,`embed` 直接報 `invalid_request`。
+
+### 長請求與斷線(streaming / background)
+
+- **問題**:高 reasoning effort(`high`/`xhigh`/`max`)的請求耗時長,單一長 HTTP 連線容易被中間層的 idle timeout 砍斷。各供應商官方文檔對此的標準建議一致:**長請求不要用單一非串流請求**。
+- **主線解法(跨供應商、預設):streaming**。streaming 連線持續吐事件把 socket 保溫——高 effort 時 cardan 已帶 `summary: "auto"`(OpenAI/Responses 系)/各家 reasoning summary,thinking deltas 在思考期間就流出,不會出現長時間靜默。這是六家唯一一致的防斷線手段,且 cardan 已具備(`stream()` + `collectStream`)。**會斷線的是非串流 `generate()`**;對長/高 effort 請求,呼叫方應走 `stream()`。`generate()` 維持原狀(短請求的便利原語),不內部改走串流端點。
+- **background 模式(OpenAI / xAI Responses,已實作)**:`GenerateOptions.background` 三態——`undefined`(預設)為 **auto**:reasoning effort 為 `high`/`xhigh`/`max`(長生成、最易被 idle timeout 砍)時自動開,否則關;`true`/`false` 強制開關。**background ≠ batch**:它**立刻以正常優先序執行**(只有極短排隊),純粹把「執行」與「HTTP 連線」解耦——連線斷了工作仍在 server 跑,幾乎不增加延遲,本質就是防斷線工具。
+  - **`store` 連動**:background 強制 `store: true`(否則無法輪詢/取回),覆蓋 cardan「預設 `store: false`」;`include: ["reasoning.encrypted_content"]` 在 background 下照送,thinking 仍從 `messages` 重放(不靠 server state),與 stateless 路徑行為一致。呼叫方可用 `providerOptions` 覆寫。background 不相容 ZDR、資料僅留約 10 分鐘,呼叫方自行斟酌。
+  - **`generate`**:POST 建立後拿 `id`,以固定間隔 GET `/v1/responses/{id}` 輪詢,離開 `queued`/`in_progress` 即解析終態。輪詢總時長由呼叫方的 `signal` 約束(無內建上限)。
+  - **`stream`**:POST 開 `background: true` + `stream: true` 的 SSE;連線中途斷掉(讀取錯誤或無 `response.completed` 即收尾)時,以 GET `/v1/responses/{id}?stream=true&starting_after=<sequence_number>` **透明續流**,對呼叫端仍是單一事件流。只在連線層級的中斷(network)續接;auth/server/`abort` 不續、直接拋。續接次數有上限(防無進展死迴圈)。
+  - **xAI 繼承**:xAI Responses 與 OpenAI 線上相容(同樣支援 `background`/`store`/GET 取回),`XAIProvider` 直接繼承實作,auto 規則一致(effort 在送出前才封頂到 `high`,auto 判斷用通用 effort,故 `xhigh`/`max` 仍視為高 effort 開 background)。
+- **不做跨供應商 `background` 統一抽象**:只有 OpenAI 與 xAI 的 Responses 有「即時、與連線解耦」的 background,故只在這兩家實作;其餘對 `background` 一律忽略。背後機制本就發散到無法乾淨統一——xAI 另有 **Deferred Chat Completions**(`deferred: true` → `request_id` → poll `/v1/chat/deferred-completion/{id}`,未好回 202)但走 **Chat Completions 端點**(非 cardan xAI 用的 Responses),我們不採用;Anthropic/Gemini/Groq **沒有**即時 background,只有 Batch(慢、離峰),它們的防斷線只能靠 streaming。
+- **Batch API 維持範圍外**(與 Non-goals 一致):Batch(Anthropic Message Batches、Gemini/Groq/xAI Batch API)是**吞吐導向**——server 離峰才處理、best-effort 約 24h SLA、半價,延遲高且不可控,目的是「不急、要便宜、要量大」。與 background「即時執行、只解耦連線」目的相反,**不能拿來防斷線**;語意與 `generate`/`stream` 完全不同。需要時由上層應用直接打供應商 Batch 端點,cardan 不封裝。
 
 ### Web search(內置/server-side 工具)
 
