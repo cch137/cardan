@@ -7,6 +7,7 @@ export type ErrorCode =
   | "not_found"
   | "server"
   | "network"
+  | "timeout"
   | "aborted"
   | "unknown";
 
@@ -15,6 +16,7 @@ const RETRYABLE: ReadonlySet<ErrorCode> = new Set([
   "overloaded",
   "server",
   "network",
+  "timeout",
 ]);
 
 export interface CardanErrorOptions {

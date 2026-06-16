@@ -8,7 +8,7 @@ import {
 import { readEnv } from "../env.js";
 import { normalizeMessages, splitLeadingSystem } from "../normalize.js";
 import { parseSse } from "../sse.js";
-import { resolveRetry, withRetry } from "../retry.js";
+import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
   addCitations,
@@ -95,6 +95,8 @@ export interface AnthropicProviderOptions {
   fetch?: typeof globalThis.fetch;
   /** Default retry behavior for all requests; `false` disables. */
   retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -300,6 +302,7 @@ export class AnthropicProvider implements Provider {
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     const body = await this.buildRequestBody(options, false);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const messages = body.messages as Array<Record<string, unknown>>;
 
     const content: ContentPart[] = [];
@@ -313,7 +316,7 @@ export class AnthropicProvider implements Provider {
     // assistant turn verbatim to resume, transparently, as one logical turn.
     for (let turn = 0; turn < MAX_SERVER_TOOL_TURNS; turn++) {
       const response = await withRetry(
-        () => this.request("/v1/messages", body, options.signal),
+        () => this.request("/v1/messages", body, options.signal, timeoutMs),
         retry,
         options.signal,
       );
@@ -352,13 +355,14 @@ export class AnthropicProvider implements Provider {
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const body = await this.buildRequestBody(options, true);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const messages = body.messages as Array<Record<string, unknown>>;
     const usage = emptyUsage();
     const citations: WebCitation[] = [];
 
     for (let turn = 0; turn < MAX_SERVER_TOOL_TURNS; turn++) {
       const response = await withRetry(
-        () => this.request("/v1/messages", body, options.signal),
+        () => this.request("/v1/messages", body, options.signal, timeoutMs),
         retry,
         options.signal,
       );
@@ -428,37 +432,43 @@ export class AnthropicProvider implements Provider {
     path: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<Response> {
     const url = `${this.options.baseUrl ?? DEFAULT_BASE_URL}${path}`;
     const payload = JSON.stringify(body);
+    const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
     const send = async (): Promise<Response> => {
       try {
         return await this.fetch(url, {
           method: "POST",
           headers: await this.requestHeaders(),
           body: payload,
-          signal: signal ?? null,
+          signal: composed ?? null,
         });
       } catch (error) {
         throw wrapFetchError(error, this.name);
       }
     };
 
-    let response = await send();
-    // The server may reject a token our clock thought was valid, or one that was
-    // revoked. Refresh once and retry before surfacing the error.
-    if (
-      !response.ok &&
-      this.oauth?.canRefresh &&
-      (response.status === 401 || response.status === 403)
-    ) {
-      await this.oauth.refresh();
-      response = await send();
+    try {
+      let response = await send();
+      // The server may reject a token our clock thought was valid, or one that
+      // was revoked. Refresh once and retry before surfacing the error.
+      if (
+        !response.ok &&
+        this.oauth?.canRefresh &&
+        (response.status === 401 || response.status === 403)
+      ) {
+        await this.oauth.refresh();
+        response = await send();
+      }
+      if (!response.ok) {
+        throw await this.httpError(response);
+      }
+      return response;
+    } finally {
+      clear();
     }
-    if (!response.ok) {
-      throw await this.httpError(response);
-    }
-    return response;
   }
 
   private async httpError(response: Response): Promise<CardanError> {

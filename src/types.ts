@@ -243,6 +243,16 @@ export interface GenerateOptions {
    * request body last (escape hatch; overrides adapter defaults).
    */
   providerOptions?: Record<string, unknown>;
+  /**
+   * Per-attempt timeout in milliseconds; `undefined`/`0` (default) means no
+   * timeout. Applies to each HTTP attempt (retries reset it) and bounds the
+   * wait until the response begins (headers arrive). For non-streaming
+   * `generate` the server only responds once generation finishes, so this
+   * effectively caps total generation time; for `stream` it bounds connection
+   * setup only (bound a mid-stream stall with `signal`). For a hard ceiling
+   * across retries, pass `signal: AbortSignal.timeout(ms)`.
+   */
+  timeoutMs?: number;
   signal?: AbortSignal;
   /** Override retry behavior; `false` disables retries. */
   retry?: Partial<RetryOptions> | false;
@@ -269,6 +279,8 @@ export interface EmbedOptions {
   model: string;
   input: string[];
   providerOptions?: Record<string, unknown>;
+  /** Per-attempt timeout (ms); `undefined`/`0` (default) means none. See {@link GenerateOptions.timeoutMs}. */
+  timeoutMs?: number;
   signal?: AbortSignal;
   retry?: Partial<RetryOptions> | false;
 }

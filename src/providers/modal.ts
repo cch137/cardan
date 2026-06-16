@@ -8,7 +8,7 @@ import {
 import { readEnv } from "../env.js";
 import { normalizeMessages, partsToText } from "../normalize.js";
 import { parseSse } from "../sse.js";
-import { resolveRetry, withRetry } from "../retry.js";
+import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
   bytesToBase64,
@@ -61,6 +61,8 @@ export interface ModalProviderOptions {
   fetch?: typeof globalThis.fetch;
   /** Default retry behavior for all requests; `false` disables. */
   retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
 }
 
 /** Chat Completions `reasoning_effort` tops out at `high`. */
@@ -150,8 +152,9 @@ export class ModalProvider implements Provider {
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     const body = await this.buildRequestBody(options, false);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/chat/completions", body, options.signal),
+      () => this.request("/v1/chat/completions", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -162,8 +165,9 @@ export class ModalProvider implements Provider {
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const body = await this.buildRequestBody(options, true);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/chat/completions", body, options.signal),
+      () => this.request("/v1/chat/completions", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -182,8 +186,9 @@ export class ModalProvider implements Provider {
     };
     if (options.providerOptions) Object.assign(body, options.providerOptions);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/embeddings", body, options.signal),
+      () => this.request("/v1/embeddings", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -240,8 +245,10 @@ export class ModalProvider implements Provider {
     path: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<Response> {
     const url = `${this.baseUrl()}${path}`;
+    const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
     let response: Response;
     try {
       response = await this.fetch(url, {
@@ -252,10 +259,12 @@ export class ModalProvider implements Provider {
           ...this.options.headers,
         },
         body: JSON.stringify(body),
-        signal: signal ?? null,
+        signal: composed ?? null,
       });
     } catch (error) {
       throw wrapFetchError(error, this.name);
+    } finally {
+      clear();
     }
     if (!response.ok) {
       throw await this.httpError(response);

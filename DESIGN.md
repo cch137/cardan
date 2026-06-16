@@ -103,7 +103,8 @@ type StreamEvent =
 
 - **ESM only**,TypeScript 編譯產出 `dist/`(tsdown),`exports` 單一入口;供應商 adapter 是否拆 subpath exports(`cardan/anthropic`)待 API 成形後決定。
 - **認證**:API key 由呼叫方顯式傳入,也支援讀取各供應商慣例的環境變數;cardan 不做任何 key 的儲存或管理。
-- **重試**:預設對 429/5xx/網路錯誤做有上限的指數退避,可關閉;timeout 與取消用 `AbortSignal`。
+- **重試**:預設對 429/5xx/網路錯誤做有上限的指數退避,可關閉;取消用 `AbortSignal`。
+- **逾時(timeout)**:`timeoutMs`(per-request 或各 `ProviderOptions` 預設,per-request 優先)是**每次 HTTP 嘗試**的上限(重試重置),`undefined`/`0`(預設)為**不逾時**(LLM 高 effort 請求耗時不可預測,硬塞預設易誤砍;與 OpenAI/Anthropic SDK 預設逾時不同,刻意選不逾時)。逾時以**可重試**的 `CardanError`(`code:"timeout"`)中止,與呼叫方 `signal` 取消(`code:"aborted"`,不重試)區分。語意錨定在「回應開始(headers 到達)」:非串流 `generate` 因伺服器生成完才回應,等同整體生成上限;串流只約束連線建立(中途卡住用 `signal`)。實作為各 provider `request()` 內以 `withTimeoutSignal` 合成 caller signal + timer,利用「fetch 以 `signal.reason` 拒絕」讓 timeout 錯誤原樣浮現(`finally` 清 timer)。要硬性總上限用 `signal: AbortSignal.timeout(ms)`;串流 idle-timeout 與總 deadline 不內建(v1)。
 - **模型識別與路由**:統一入口用 `provider/model` 字串(如 `openai/gpt-5.5`),由入口解析後直接路由到對應 adapter。解析規則定死為**只切第一個 `/`**:前段是 provider,其餘原樣傳給供應商(模型名本身可能含 `/`,如 `groq/meta-llama/llama-4-scout`)。per-provider adapter 直接收不帶前綴的模型名。不 hard-code 封閉的模型集合(維護成本高、落後上游);型別層用 template literal + `(string & {})` 提供已知模型的 autocomplete。**autocomplete 清單只列前沿模型**:同價位若已有更好的替代品,舊型號預設淘汰、不列入(`(string & {})` 仍接受任何字串,僅是不再提示);測試同步只用前沿模型,唯獨刻意驗證「能力缺失」的負向測試保留不具該能力的舊模型作 fixture。
 - **zod 支援**:zod 是 optional peerDependency(`zod@^4`)。tools 與 structured output 的 schema 參數接受純 JSON Schema 物件或 zod schema;zod schema 用其實例方法 `.parse()` 驗證回應、用 zod 4 原生 `z.toJSONSchema` 轉換(動態 import,僅在呼叫方實際傳入 zod schema 時觸發)。cardan 內部解析供應商回應不用 zod,維持 TypeScript 型別 + 防禦性解析。
 - **測試**:核心轉換邏輯(message/usage/stream 的雙向映射、訊息序列正規化)用 fixture 單元測試;對真實 API 的 smoke test 獨立成手動執行的腳本,不進 CI。

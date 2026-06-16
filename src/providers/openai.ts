@@ -9,7 +9,7 @@ import {
 import { readEnv } from "../env.js";
 import { normalizeMessages, partsToText } from "../normalize.js";
 import { parseSse } from "../sse.js";
-import { delay, resolveRetry, withRetry } from "../retry.js";
+import { delay, resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
   addCitations,
@@ -61,6 +61,8 @@ export interface OpenAIProviderOptions {
   fetch?: typeof globalThis.fetch;
   /** Default retry behavior for all requests; `false` disables. */
   retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
 }
 
 const DEFAULT_BASE_URL = "https://api.openai.com";
@@ -141,8 +143,9 @@ export class OpenAIProvider implements Provider {
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     const body = await this.buildRequestBody(options, false);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/responses", body, options.signal),
+      () => this.request("/v1/responses", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -150,7 +153,7 @@ export class OpenAIProvider implements Provider {
     if (body.background === true) {
       // background returns immediately while the model runs server-side;
       // poll until the response reaches a terminal state
-      raw = await this.pollBackground(raw, options.signal, retry);
+      raw = await this.pollBackground(raw, options.signal, retry, timeoutMs);
     }
     return this.parseResponse(raw, options);
   }
@@ -162,8 +165,9 @@ export class OpenAIProvider implements Provider {
       yield* this.streamBackground(body, options, retry);
       return;
     }
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/responses", body, options.signal),
+      () => this.request("/v1/responses", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -182,8 +186,9 @@ export class OpenAIProvider implements Provider {
     };
     if (options.providerOptions) Object.assign(body, options.providerOptions);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/embeddings", body, options.signal),
+      () => this.request("/v1/embeddings", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -219,8 +224,10 @@ export class OpenAIProvider implements Provider {
     path: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<Response> {
     const url = `${this.options.baseUrl ?? this.defaultBaseUrl}${path}`;
+    const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
     let response: Response;
     try {
       response = await this.fetch(url, {
@@ -231,10 +238,12 @@ export class OpenAIProvider implements Provider {
           ...this.options.headers,
         },
         body: JSON.stringify(body),
-        signal: signal ?? null,
+        signal: composed ?? null,
       });
     } catch (error) {
       throw wrapFetchError(error, this.name);
+    } finally {
+      clear();
     }
     if (!response.ok) {
       throw await this.httpError(response);
@@ -245,8 +254,10 @@ export class OpenAIProvider implements Provider {
   private async requestGet(
     path: string,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<Response> {
     const url = `${this.options.baseUrl ?? this.defaultBaseUrl}${path}`;
+    const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
     let response: Response;
     try {
       response = await this.fetch(url, {
@@ -255,10 +266,12 @@ export class OpenAIProvider implements Provider {
           authorization: `Bearer ${this.apiKey()}`,
           ...this.options.headers,
         },
-        signal: signal ?? null,
+        signal: composed ?? null,
       });
     } catch (error) {
       throw wrapFetchError(error, this.name);
+    } finally {
+      clear();
     }
     if (!response.ok) {
       throw await this.httpError(response);
@@ -636,6 +649,7 @@ export class OpenAIProvider implements Provider {
     initial: OpenAIResponseBody,
     signal: AbortSignal | undefined,
     retry: RetryOptions,
+    timeoutMs: number | undefined,
   ): Promise<OpenAIResponseBody> {
     let raw = initial;
     while (raw.status === "queued" || raw.status === "in_progress") {
@@ -649,7 +663,7 @@ export class OpenAIProvider implements Provider {
       await delay(BACKGROUND_POLL_MS, signal);
       const id = raw.id;
       const response = await withRetry(
-        () => this.requestGet(`/v1/responses/${id}`, signal),
+        () => this.requestGet(`/v1/responses/${id}`, signal, timeoutMs),
         retry,
         signal,
       );
@@ -670,11 +684,12 @@ export class OpenAIProvider implements Provider {
     retry: RetryOptions,
   ): AsyncGenerator<StreamEvent> {
     const { signal } = options;
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     let responseId: string | undefined;
     let lastSeq: number | undefined;
     let resumes = 0;
     let stream = await this.openStream(
-      () => this.request("/v1/responses", body, signal),
+      () => this.request("/v1/responses", body, signal, timeoutMs),
       retry,
       signal,
     );
@@ -723,6 +738,7 @@ export class OpenAIProvider implements Provider {
           this.requestGet(
             `/v1/responses/${responseId}?stream=true&starting_after=${cursor}`,
             signal,
+            timeoutMs,
           ),
         retry,
         signal,

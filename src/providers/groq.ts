@@ -8,7 +8,7 @@ import {
 import { readEnv } from "../env.js";
 import { normalizeMessages, partsToText } from "../normalize.js";
 import { parseSse } from "../sse.js";
-import { resolveRetry, withRetry } from "../retry.js";
+import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
   addCitations,
@@ -58,6 +58,8 @@ export interface GroqProviderOptions {
   fetch?: typeof globalThis.fetch;
   /** Default retry behavior for all requests; `false` disables. */
   retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
 }
 
 const DEFAULT_BASE_URL = "https://api.groq.com/openai";
@@ -174,8 +176,9 @@ export class GroqProvider implements Provider {
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     const body = await this.buildRequestBody(options, false);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/chat/completions", body, options.signal),
+      () => this.request("/v1/chat/completions", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -186,8 +189,9 @@ export class GroqProvider implements Provider {
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const body = await this.buildRequestBody(options, true);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
-      () => this.request("/v1/chat/completions", body, options.signal),
+      () => this.request("/v1/chat/completions", body, options.signal, timeoutMs),
       retry,
       options.signal,
     );
@@ -227,8 +231,10 @@ export class GroqProvider implements Provider {
     path: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<Response> {
     const url = `${this.options.baseUrl ?? DEFAULT_BASE_URL}${path}`;
+    const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
     let response: Response;
     try {
       response = await this.fetch(url, {
@@ -239,10 +245,12 @@ export class GroqProvider implements Provider {
           ...this.options.headers,
         },
         body: JSON.stringify(body),
-        signal: signal ?? null,
+        signal: composed ?? null,
       });
     } catch (error) {
       throw wrapFetchError(error, this.name);
+    } finally {
+      clear();
     }
     if (!response.ok) {
       throw await this.httpError(response);

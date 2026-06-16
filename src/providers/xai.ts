@@ -33,6 +33,8 @@ export interface XAIProviderOptions {
   fetch?: typeof globalThis.fetch;
   /** Default retry behavior for all requests; `false` disables. */
   retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
 }
 
 /** xAI tops out at `high` (no `xhigh`); `none` disables reasoning. */

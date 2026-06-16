@@ -8,6 +8,46 @@ export function resolveRetry(
   return { ...DEFAULT_RETRY, ...retry };
 }
 
+/** Resolves the effective per-attempt timeout; `<= 0`/undefined means none. */
+export function resolveTimeout(
+  perCall: number | undefined,
+  providerDefault: number | undefined,
+): number | undefined {
+  const t = perCall ?? providerDefault;
+  return t && t > 0 ? t : undefined;
+}
+
+/**
+ * Composes the caller's `signal` with a per-attempt timeout into one signal for
+ * `fetch`. The timeout aborts with a `CardanError("timeout")` (retryable), while
+ * a caller abort propagates its own reason (staying `aborted`, not retryable);
+ * because `fetch` rejects with `signal.reason`, that error surfaces verbatim.
+ * The caller MUST invoke `clear()` in a `finally` to cancel the timer and detach
+ * the listener — a pending timer would otherwise keep the event loop alive.
+ */
+export function withTimeoutSignal(
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): { signal: AbortSignal | undefined; clear: () => void } {
+  if (!timeoutMs || timeoutMs <= 0) return { signal, clear: () => {} };
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort(
+      new CardanError("timeout", `request timed out after ${timeoutMs}ms`),
+    );
+  }, timeoutMs);
+  const onAbort = () => controller.abort(signal!.reason);
+  if (signal) {
+    if (signal.aborted) controller.abort(signal.reason);
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const clear = (): void => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  };
+  return { signal: controller.signal, clear };
+}
+
 export function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {

@@ -8,7 +8,7 @@ import {
 import { readEnv } from "../env.js";
 import { normalizeMessages, splitLeadingSystem } from "../normalize.js";
 import { parseSse } from "../sse.js";
-import { resolveRetry, withRetry } from "../retry.js";
+import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
 import {
   addCitations,
@@ -57,6 +57,8 @@ export interface GoogleProviderOptions {
   fetch?: typeof globalThis.fetch;
   /** Default retry behavior for all requests; `false` disables. */
   retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
 }
 
 const DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -131,12 +133,14 @@ export class GoogleProvider implements Provider {
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     const body = await this.buildRequestBody(options);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
       () =>
         this.request(
           this.modelUrl(options.model, "generateContent"),
           body,
           options.signal,
+          timeoutMs,
         ),
       retry,
       options.signal,
@@ -148,12 +152,14 @@ export class GoogleProvider implements Provider {
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const body = await this.buildRequestBody(options);
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
       () =>
         this.request(
           `${this.modelUrl(options.model, "streamGenerateContent")}?alt=sse`,
           body,
           options.signal,
+          timeoutMs,
         ),
       retry,
       options.signal,
@@ -176,12 +182,14 @@ export class GoogleProvider implements Provider {
       })),
     };
     const retry = resolveRetry(options.retry ?? this.options.retry);
+    const timeoutMs = resolveTimeout(options.timeoutMs, this.options.timeoutMs);
     const response = await withRetry(
       () =>
         this.request(
           this.modelUrl(model, "batchEmbedContents"),
           body,
           options.signal,
+          timeoutMs,
         ),
       retry,
       options.signal,
@@ -228,7 +236,9 @@ export class GoogleProvider implements Provider {
     url: string,
     body: Record<string, unknown>,
     signal?: AbortSignal,
+    timeoutMs?: number,
   ): Promise<Response> {
+    const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
     let response: Response;
     try {
       response = await this.fetch(url, {
@@ -239,10 +249,12 @@ export class GoogleProvider implements Provider {
           ...this.options.headers,
         },
         body: JSON.stringify(body),
-        signal: signal ?? null,
+        signal: composed ?? null,
       });
     } catch (error) {
       throw wrapFetchError(error, this.name);
+    } finally {
+      clear();
     }
     if (!response.ok) {
       throw await this.httpError(response);
