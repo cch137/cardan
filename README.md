@@ -8,6 +8,22 @@ See [DESIGN.md](./DESIGN.md) for goals, non-goals, and provider tiers.
 
 0.x — API is unstable until raven/ticks migrate onto it. Implemented: core schema + Anthropic, OpenAI (Responses API), Google (Gemini API), xAI, Groq, and Modal (self-deployed, Chat Completions) adapters (generate, streaming, tools, structured output, thinking, vision; OpenAI, Google, and Modal also embeddings).
 
+## Providers
+
+Model ids are `prefix/model`. `createCardan()` reads these env vars for each provider (or pass keys explicitly in config):
+
+| Provider  | Prefix      | Env vars                                                       |
+| --------- | ----------- | -------------------------------------------------------------- |
+| Anthropic | `anthropic` | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` (subscription) |
+| OpenAI    | `openai`    | `OPENAI_API_KEY`                                               |
+| Google    | `google`    | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)                         |
+| xAI       | `xai`       | `XAI_API_KEY`                                                  |
+| Groq      | `groq`      | `GROQ_API_KEY`                                                 |
+| Modal     | `modal`     | `MODAL_BASE_URL` (required); `MODAL_API_KEY`, or `MODAL_KEY` + `MODAL_SECRET` |
+
+- **Anthropic auth precedence** (most explicit first): config `oauth` → config `apiKey` → env `CLAUDE_CODE_OAUTH_TOKEN` → env `ANTHROPIC_API_KEY`. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) bills against a Claude.ai subscription; if both env vars are set, the OAuth token wins and cardan warns. For the full refreshable OAuth flow (rotating tokens), pass `oauth` in config — see [Anthropic `oauth`](#behavior-notes).
+- **Google**: cardan prefers `GEMINI_API_KEY`; if both it and `GOOGLE_API_KEY` are set, cardan warns (Google's own `@google/genai` SDK prefers `GOOGLE_API_KEY`, so the two can disagree).
+
 ## Usage
 
 ```ts

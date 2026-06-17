@@ -129,6 +129,41 @@ test("oauth mode: proactive refresh on expiry, rotation persisted, deduped", asy
   );
 });
 
+test("env CLAUDE_CODE_OAUTH_TOKEN selects bearer auth, no config needed", async () => {
+  const prev = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "ENV_AT";
+  try {
+    const calls: Call[] = [];
+    const provider = new AnthropicProvider({
+      fetch: routedFetch({ calls, onToken: () => tokenResponse({}), onMessages: () => messageResponse() }),
+    });
+    await provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "hi")] });
+    assert.equal(calls[0]!.headers["authorization"], "Bearer ENV_AT");
+    assert.equal(calls[0]!.headers["x-api-key"], undefined);
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = prev;
+  }
+});
+
+test("explicit apiKey opts out of env CLAUDE_CODE_OAUTH_TOKEN", async () => {
+  const prev = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = "ENV_AT";
+  try {
+    const calls: Call[] = [];
+    const provider = new AnthropicProvider({
+      apiKey: "sk-explicit",
+      fetch: routedFetch({ calls, onToken: () => tokenResponse({}), onMessages: () => messageResponse() }),
+    });
+    await provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "hi")] });
+    assert.equal(calls[0]!.headers["x-api-key"], "sk-explicit");
+    assert.equal(calls[0]!.headers["authorization"], undefined);
+  } finally {
+    if (prev === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    else process.env.CLAUDE_CODE_OAUTH_TOKEN = prev;
+  }
+});
+
 test("oauth mode: 401 triggers refresh + single retry, then recovers", async () => {
   const calls: Call[] = [];
   const provider = new AnthropicProvider({

@@ -5,7 +5,7 @@ import {
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
-import { readEnv } from "../env.js";
+import { readEnv, warnOnce } from "../env.js";
 import { normalizeMessages, splitLeadingSystem } from "../normalize.js";
 import { parseSse } from "../sse.js";
 import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
@@ -212,10 +212,18 @@ export class GoogleProvider implements Provider {
   // -------------------------------------------------------------------------
 
   private apiKey(): string {
-    const key =
-      this.options.apiKey ??
-      readEnv("GEMINI_API_KEY") ??
-      readEnv("GOOGLE_API_KEY");
+    if (this.options.apiKey) return this.options.apiKey;
+    const gemini = readEnv("GEMINI_API_KEY");
+    const google = readEnv("GOOGLE_API_KEY");
+    if (gemini && google) {
+      warnOnce(
+        "google-dual-env",
+        "both GEMINI_API_KEY and GOOGLE_API_KEY are set; using GEMINI_API_KEY. " +
+          "Google's own @google/genai SDK prefers GOOGLE_API_KEY, so the two may " +
+          "disagree — set only one.",
+      );
+    }
+    const key = gemini ?? google;
     if (!key) {
       throw new CardanError(
         "auth",

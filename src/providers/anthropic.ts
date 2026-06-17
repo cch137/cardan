@@ -5,7 +5,7 @@ import {
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
-import { readEnv } from "../env.js";
+import { readEnv, warnOnce } from "../env.js";
 import { normalizeMessages, splitLeadingSystem } from "../normalize.js";
 import { parseSse } from "../sse.js";
 import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
@@ -296,7 +296,33 @@ export class AnthropicProvider implements Provider {
   constructor(options: AnthropicProviderOptions = {}) {
     this.options = options;
     this.fetch = options.fetch ?? globalThis.fetch;
-    if (options.oauth) this.oauth = new ClaudeOAuthAuth(options.oauth, this.fetch);
+    this.oauth = this.resolveOAuth(options);
+  }
+
+  /**
+   * Picks the auth path. Precedence (most explicit first): config `oauth` >
+   * config `apiKey` > env `CLAUDE_CODE_OAUTH_TOKEN` > env `ANTHROPIC_API_KEY`
+   * (the last is handled lazily in `apiKey()`). Returning a `ClaudeOAuthAuth`
+   * selects the Bearer/subscription path; `undefined` falls back to API key.
+   */
+  private resolveOAuth(
+    options: AnthropicProviderOptions,
+  ): ClaudeOAuthAuth | undefined {
+    if (options.oauth) return new ClaudeOAuthAuth(options.oauth, this.fetch);
+    // An explicit API key opts out of the subscription path; only fall back to
+    // the env OAuth token when no credential was configured at all.
+    if (options.apiKey) return undefined;
+    const token = readEnv("CLAUDE_CODE_OAUTH_TOKEN");
+    if (!token) return undefined;
+    if (readEnv("ANTHROPIC_API_KEY")) {
+      warnOnce(
+        "anthropic-dual-env",
+        "both CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY are set; using the " +
+          "OAuth (subscription) token. Unset CLAUDE_CODE_OAUTH_TOKEN to use the API key.",
+      );
+    }
+    // `claude setup-token` issues a long-lived, non-refreshable token.
+    return new ClaudeOAuthAuth({ credentials: { accessToken: token } }, this.fetch);
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {

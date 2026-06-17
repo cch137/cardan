@@ -16,3 +16,15 @@ export function readEnv(name: string): string | undefined {
     return undefined;
   }
 }
+
+const warned = new Set<string>();
+
+/**
+ * Emits a `console.warn` for ambiguous-configuration cases, at most once per
+ * `key` per process so repeated requests don't spam the log.
+ */
+export function warnOnce(key: string, message: string): void {
+  if (warned.has(key)) return;
+  warned.add(key);
+  console.warn(`[cardan] ${message}`);
+}
