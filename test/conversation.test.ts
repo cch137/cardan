@@ -19,6 +19,7 @@ import {
 function textResult(text: string, finishReason: FinishReason = "stop"): GenerateResult {
   return {
     message: { role: "assistant", content: [{ type: "text", text }] },
+    text,
     finishReason,
     usage: emptyUsage(),
     raw: {},
@@ -28,6 +29,7 @@ function textResult(text: string, finishReason: FinishReason = "stop"): Generate
 function toolCallResult(id: string, name: string, args: unknown): GenerateResult {
   return {
     message: { role: "assistant", content: [{ type: "tool_call", id, name, args }] },
+    text: "",
     finishReason: "tool_calls",
     usage: emptyUsage(),
     raw: {},

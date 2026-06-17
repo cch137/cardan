@@ -6,7 +6,7 @@ import {
   type ErrorCode,
 } from "../errors.js";
 import { readEnv, warnOnce } from "../env.js";
-import { normalizeMessages, splitLeadingSystem } from "../normalize.js";
+import { normalizeMessages, partsToText, splitLeadingSystem } from "../normalize.js";
 import { parseSse } from "../sse.js";
 import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
 import { toJsonSchema } from "../schema.js";
@@ -386,6 +386,7 @@ export class AnthropicProvider implements Provider {
 
     const result: GenerateResult = {
       message: { role: "assistant", content },
+      text: partsToText(content),
       finishReason,
       usage,
       raw: lastRaw,

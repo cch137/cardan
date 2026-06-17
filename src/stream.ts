@@ -9,6 +9,7 @@ import {
   type ThinkingPart,
   type WebCitation,
 } from "./types.js";
+import { partsToText } from "./normalize.js";
 
 /**
  * Accumulates a stream into a GenerateResult-shaped value. Consecutive
@@ -94,6 +95,7 @@ export async function collectStream(
 
   return {
     message: { role: "assistant", content },
+    text: partsToText(content),
     finishReason,
     usage,
     ...(citations ? { citations } : {}),

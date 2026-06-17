@@ -203,7 +203,7 @@ export const DEFAULT_RETRY: RetryOptions = {
   maxDelayMs: 30000,
 };
 
-export interface GenerateOptions {
+export interface GenerateOptions<S extends SchemaInput = SchemaInput> {
   /** Model name without provider prefix (adapters), e.g. `claude-opus-4-8`. */
   model: string;
   messages: Message[];
@@ -216,7 +216,7 @@ export interface GenerateOptions {
    */
   webSearch?: boolean | WebSearchOptions;
   /** Structured output: constrain the response to a JSON schema. */
-  output?: { schema: SchemaInput };
+  output?: { schema: S };
   maxOutputTokens?: number;
   temperature?: number;
   topP?: number;
@@ -258,13 +258,19 @@ export interface GenerateOptions {
   retry?: Partial<RetryOptions> | false;
 }
 
-export interface GenerateResult {
+export interface GenerateResult<T = unknown> {
   /** Assistant message (text / thinking / tool_call parts). */
   message: Message;
   finishReason: FinishReason;
   usage: Usage;
+  /**
+   * The assistant reply's visible text: its `text` parts joined with "\n",
+   * excluding thinking and tool calls. Convenience over walking
+   * `message.content`; empty string when the turn produced no text.
+   */
+  text: string;
   /** Parsed (and zod-validated, if applicable) structured output. */
-  output?: unknown;
+  output?: T;
   /** Web-search sources the model cited, if web search ran. */
   citations?: WebCitation[];
   /** Raw provider response body, for debugging/forward-compat. */

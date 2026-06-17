@@ -36,6 +36,7 @@ import type {
   Provider,
   StreamEvent,
 } from "./types.js";
+import type { Infer, SchemaInput } from "./schema.js";
 import { Conversation, type ConversationOptions } from "./conversation.js";
 
 export type {
@@ -207,9 +208,13 @@ export class Cardan {
     return provider;
   }
 
-  generate(options: Prefixed<GenerateOptions>): Promise<GenerateResult> {
+  generate<S extends SchemaInput = SchemaInput>(
+    options: Prefixed<GenerateOptions<S>>,
+  ): Promise<GenerateResult<Infer<S>>> {
     const { provider, model } = this.route(options.model);
-    return provider.generate({ ...options, model });
+    return provider.generate({ ...options, model }) as Promise<
+      GenerateResult<Infer<S>>
+    >;
   }
 
   stream(options: Prefixed<GenerateOptions>): AsyncIterable<StreamEvent> {

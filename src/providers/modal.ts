@@ -406,6 +406,7 @@ export class ModalProvider implements Provider {
     }
     const result: GenerateResult = {
       message: { role: "assistant", content },
+      text: partsToText(content),
       finishReason: mapFinishReason(choice?.finish_reason),
       usage: mapUsage(raw.usage ?? undefined),
       raw,

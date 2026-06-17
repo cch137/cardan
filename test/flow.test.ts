@@ -21,6 +21,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function textResult(text: string): GenerateResult {
   return {
     message: { role: "assistant", content: [{ type: "text", text }] },
+    text,
     finishReason: "stop",
     usage: emptyUsage(),
     raw: {},

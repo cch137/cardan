@@ -515,6 +515,7 @@ export class OpenAIProvider implements Provider {
     }
     const result: GenerateResult = {
       message: { role: "assistant", content },
+      text: partsToText(content),
       finishReason: deriveFinishReason(raw),
       usage: mapUsage(raw.usage),
       raw,

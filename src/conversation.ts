@@ -42,8 +42,8 @@ export interface CallInfo {
 /** Per-turn options. Every key is a default the conversation can carry (set at
  *  construction or reassigned on `defaults`) and override per `ask`; none is
  *  privileged — `model` and `tools` are merged the same way. */
-export interface AskOptions
-  extends Omit<GenerateOptions, "model" | "messages" | "tools"> {
+export interface AskOptions<S extends SchemaInput = SchemaInput>
+  extends Omit<GenerateOptions<S>, "model" | "messages" | "tools"> {
   /** `provider/model`; overrides the conversation default for this turn. */
   model?: ModelId;
   /** Client-side tools; when present, `ask` loops model↔tools until it stops. */
@@ -175,7 +175,10 @@ export class Conversation {
   /** Append a user text turn, generate, append the assistant reply, return it.
    *  When `options.tools` are present, loop model↔tools until the model stops
    *  (optionally compacting the intermediate rounds afterwards). */
-  async ask(text: string, options: AskOptions = {}): Promise<GenerateResult> {
+  async ask<S extends SchemaInput = SchemaInput>(
+    text: string,
+    options: AskOptions<S> = {},
+  ): Promise<GenerateResult<Infer<S>>> {
     const { tools, maxRounds, compact, step, ...gen } = {
       ...this.defaults,
       ...options,
@@ -192,7 +195,9 @@ export class Conversation {
       );
     }
     this.messages.push({ role: "user", content: [{ type: "text", text }] });
-    if (!tools?.length) return this.generateOnce(gen, step);
+    if (!tools?.length) {
+      return this.generateOnce(gen, step) as Promise<GenerateResult<Infer<S>>>;
+    }
 
     const mark = this.messages.length; // first message after the user prompt
     const res = await this.runToolLoop(tools, gen, step, maxRounds);
@@ -201,7 +206,7 @@ export class Conversation {
       const region = this.messages.slice(mark); // tool rounds + final conclusion
       this.messages.splice(mark, region.length, ...compactor(region));
     }
-    return res;
+    return res as GenerateResult<Infer<S>>;
   }
 
   /** Generate against the current transcript and append the reply. No new user
