@@ -191,11 +191,55 @@ const synthesize: Step<S> = (s) => ({ answer: combine(s.web, s.docs) }); // join
 
 **Parallel, two ways**: do the same work over N items *inside* a step with `parallel()` (the common case — concurrency-limited, order-preserving); use step-level fan-out only when branches have *different downstream routing*. `onEvent` receives `step:start` / `step:end` / `error`, plus `llm` events for every call made through `ctx.conversation`.
 
+### Pool
+
+`createPool({ members })` builds a `PoolProvider` — a `Provider` that rotates over several accounts of the **same** provider and fails over on transient errors. It's for multi-account credential rotation (e.g. several Claude.ai OAuth subscriptions), not cross-provider routing. Use it directly, or inject it: `createCardan({ providers: { anthropic: pool } })`.
+
+`members` accepts bare provider instances; map your credentials straight into them. Use the `{ provider, weight?, label? }` form only when you need a custom weight or label.
+
+```ts
+import { AnthropicProvider, createPool } from "cardan";
+
+// one member per Claude setup-token (oauth accepts a bare token string)
+const pool = createPool({
+  members: tokens.map((token) => new AnthropicProvider({ oauth: token })),
+  onFailover: (i) => log.warn(`switch ${i.fromLabel} → ${i.toLabel}: ${i.error.code}`),
+});
+
+await pool.generate({ model: "claude-opus-4-8", messages }); // routed to whichever member is up
+
+// mix in weights / labels with the object form where needed
+createPool({ members: [primary, { provider: backup, weight: 2, label: "backup" }] });
+```
+
+A pool *is* a `Provider`, so it composes anywhere a provider is expected. Inject it under one slot of a `Cardan` while other providers stay single — the `provider/model` prefix routes to it transparently:
+
+```ts
+import { AnthropicProvider, OpenAIProvider, createCardan, createPool } from "cardan";
+
+const cardan = createCardan({
+  providers: {
+    anthropic: createPool({ members: tokens.map((t) => new AnthropicProvider({ oauth: t })) }),
+    openai: new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY }), // single
+  },
+});
+
+await cardan.generate({ model: "anthropic/claude-opus-4-8", messages }); // → the pool
+await cardan.generate({ model: "openai/gpt-5.5", messages });            // → the single provider
+```
+
+Because a pool is just a `Provider`, it also nests: a `PoolProvider` can itself be a member of another pool (e.g. group several account pools), and the `Conversation`/`Flow` layers accept it wherever they accept a `Cardan` or provider.
+
+- **Rotation**: a fixed, evenly-interleaved round-robin built from member `weight`s (default 1); each request takes the next slot.
+- **Failover**: on a `rate_limit | auth | server | network | timeout` error it switches to the next *distinct* member and retries (the pool owns this retry, so per-attempt provider retry is disabled while ≥2 members are tried). `maxFailovers` caps switches; `shouldFailover` customizes which errors qualify. For `stream`, a switch is only possible before the first event is emitted.
+- **Cooldown**: a failed member is skipped on later requests until it recovers, with a scope that matches the error's signal. An absolute `resetAt` (exact, uncapped — e.g. Anthropic's *account-wide* subscription window reset, read from the `anthropic-ratelimit-unified-reset` response header) cools the **whole member across every model**. A relative `Retry-After` (whose limit may be per-model, e.g. OpenAI TPM) cools **only that model**, so a 429 on `opus` doesn't sideline the account for `sonnet` (capped by `maxCooldownMs`, default 15 min). With neither signal the member is not cooled (failover only) — a transient fault isn't necessarily an account problem. Cooled members thaw automatically when the deadline passes.
+- **All cooling**: if every member is cooling for the model, the pool tries the soonest-to-recover one as a last-ditch attempt (it may have reset early), then throws a `rate_limit` `CardanError` naming the soonest recovery time (`retryAfterMs` set accordingly).
+
 ## Behavior notes
 
 - **Message normalization** (applied before every request): consecutive same-role messages merge; `tool_result` parts are relocated into a `tool` message directly after their `tool_call`, in call order; a dangling `tool_call` (no result) gets a synthesized error result (`isError: true`) so aborted conversations stay replayable; an orphan or duplicate `tool_result` throws `invalid_request`.
 - **System messages**: leading system messages hoist to the provider's top-level system field (Anthropic `system`, Gemini `systemInstruction`); mid-conversation system messages downgrade to user text. OpenAI's Responses API accepts `system` anywhere in `input`, so system messages pass through in place.
-- **Anthropic `oauth`**: pass `{ oauth: { credentials: { accessToken, refreshToken?, expiresAt? }, onRefresh? } }` to authenticate with a Claude.ai OAuth token instead of `apiKey`. Sends Bearer auth, refreshes before expiry (persist the rotated token via `onRefresh`), and retries once on 401.
+- **Anthropic `oauth`**: pass `{ oauth: { credentials: { accessToken, refreshToken?, expiresAt? }, onRefresh? } }` to authenticate with a Claude.ai OAuth token instead of `apiKey`, or a bare token string (`{ oauth: token }`) as shorthand for `{ credentials: { accessToken: token } }` — handy for a `claude setup-token` token. Sends Bearer auth, refreshes before expiry (persist the rotated token via `onRefresh`), and retries once on 401. On a subscription rate-limit (429) the adapter reads the exact window reset from the `anthropic-ratelimit-unified-reset` response header into `CardanError.resetAt` (epoch ms) — this is what gives a [Pool](#pool) precise per-account cooldowns, and it works even for an inference-only `claude setup-token` (unlike the `/api/oauth/usage` endpoint, which needs the `user:profile` scope).
 - **OpenAI is stateless by default**: every request sends `store: false` + `include: ["reasoning.encrypted_content"]`; context is replayed from `messages` and reasoning items survive multi-turn tool use via `encrypted_content` (held in `ThinkingPart.signature` with the item id in `ThinkingPart.id`). Override via `providerOptions`. The Responses API has no stop-sequence parameter, so `stopSequences` is ignored there.
 - **Background mode** (`background?: boolean`, OpenAI/xAI Responses only): keeps long high-effort generations from dropping on idle-connection timeouts by decoupling execution from the HTTP connection. `undefined` (default) auto-enables it for `high`/`xhigh`/`max` reasoning effort; `true`/`false` force it. It forces `store: true` (so it's not ZDR-compatible; data is retained ~10 min): `generate` creates the response then polls `GET /v1/responses/{id}` to completion, and `stream` transparently resumes a dropped SSE via `starting_after`. Other providers ignore the flag (use streaming for long requests there). The total time is bounded by your `signal`.
 - **xAI** speaks the same Responses API (its Chat Completions endpoint is documented as legacy), so the adapter subclasses the OpenAI one and inherits the stateless defaults and background mode above. Differences: `reasoning.effort` caps at `high` (grok-4.3+ only — omit `reasoning` for older models), no `summary` parameter is sent (xAI always returns detailed reasoning summaries), grok models keep `temperature`/`top_p`, and there is no embeddings API.
@@ -210,7 +254,7 @@ const synthesize: Step<S> = (s) => ({ answer: combine(s.web, s.docs) }); // join
 - **Thinking parts**: replayed with their `signature`; unsigned thinking parts are dropped on send; `redacted: true` maps to Anthropic `redacted_thinking`.
 - **Tool call ids**: provider-assigned ids are preserved verbatim. Gemini 2.x omits function-call ids, so the adapter synthesizes `cardan_call_…` ids for pairing and strips them on replay; Gemini `thoughtSignature`s ride on `signature` of text/thinking/tool_call parts and are required for Gemini 3 function-calling replay (preserved identically in streaming and non-streaming — see below).
 - **Gemini files**: image/file input supports inline bytes (`inlineData`) and `URL` → `fileData.fileUri` passthrough (Files API URIs); cardan does not wrap the File API itself. `embed` uses `batchEmbedContents`, which returns no usage metadata.
-- **Errors**: all failures are `CardanError` with `code` (`auth` / `rate_limit` / `overloaded` / `context_length` / `invalid_request` / `not_found` / `server` / `network` / `timeout` / `aborted` / `unknown`), `status`, `retryable`, and the raw provider body in `raw`.
+- **Errors**: all failures are `CardanError` with `code` (`auth` / `rate_limit` / `overloaded` / `context_length` / `invalid_request` / `not_found` / `server` / `network` / `timeout` / `aborted` / `unknown`), `status`, `retryable`, `retryAfterMs` (relative, from `Retry-After`), `resetAt` (absolute epoch ms, when the provider reports an exact rate-limit reset), and the raw provider body in `raw`.
 
 ## Reasoning / thinking state
 

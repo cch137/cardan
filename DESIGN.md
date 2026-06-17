@@ -31,7 +31,7 @@
 - **不做 prompt 管理**:無模板、無 prompt registry。
 - **不做 RAG**:無 vector store、無 chunking。
 - **不做 gateway/proxy**:cardan 是 client 端的庫,不是服務。
-- **不做供應商自動 fallback/路由**(v1):呼叫方自行決定用哪個 model;路由是上層應用的職責。
+- **不做跨供應商自動 fallback/路由**:呼叫方自行決定用哪個 model;model→provider 路由是上層應用的職責。(注意:`PoolProvider` 做的是**同一 provider 的多帳號憑證輪替 + failover**,不是跨 provider 路由,不在此 non-goal 內——見「Pool」一節。)
 - **不追求覆蓋所有供應商**:只支援下方分級清單,新增供應商需有實際使用需求。
 - **不重新發明 SDK 的全部功能**:files API、batch API、fine-tuning 等管理面功能不在範圍內,除非未來有實際需求再逐案加入。
 
@@ -146,6 +146,28 @@ type StreamEvent =
 - Groq structured output:`response_format.json_schema` 的 `strict: true`(constrained decoding)僅 gpt-oss 支援,能力表閘控;其他模型走 best-effort(不帶 strict 旗標,zod schema 仍由 client 端驗證)。不支援 json_schema 的模型(llama-3.x)由 Groq 直接報錯。
 - Groq streaming usage 在 `finish_reason` chunk 上(頂層 `usage` 與 `x_groq.usage` 皆有,免 `stream_options`),終止符 `data: [DONE]`;tool call 以 `index` 聚合,id(`fc_…`)原樣保留。prompt caching 全自動,`prompt_tokens_details.cached_tokens`→`cache_read`。413(request_too_large)映射 `context_length`。
 - Groq 送 `max_completion_tokens`;無 embeddings API,`embed` 直接報 `invalid_request`。
+
+### Pool(多帳號 failover + cooldown)
+
+- **定位**:`PoolProvider`(`createPool({ members })`)是一個 `Provider`,在**同一 provider 的多個帳號**間輪替並在暫時性錯誤時 failover。用途是多帳號憑證輪替(典型:多個 Claude.ai OAuth 訂閱),**不是跨 provider/model 路由**(那是 non-goal)。可直接用,或注入 `createCardan({ providers: { anthropic: pool } })`。混入不同 provider 名稱會 `warnOnce`(model id 原樣送給被選中的成員,混用幾乎必是設定錯誤)。
+- **成員輸入**:`members: (Provider | PoolMember)[]`——直接放裸 provider 實例(weight 1、自動 label),把憑證 `.map` 進去即可;只有要自訂 weight/label 才用 `{ provider, weight?, label? }`。刻意不做 per-provider sugar(`createXxxPool`)或「傳建構式」的工廠:放寬 `members` 元素型別就涵蓋所有 provider、零新增 API、`pool.ts` 仍不認識任何具體 provider。tuning 旋鈕抽成 `PoolBehavior`(= `PoolOptions` 去掉 `members`)當單一真相源。
+- **輪替**:建構時依 `weight` 產生固定、均勻交錯的 round-robin 序列(`buildRotation`),每次請求取下一格。
+- **failover**:對 `rate_limit | auth | server | network | timeout` 切換到下一個**相異**成員重試;池自己擁有這層跨帳號重試,故當會嘗試 ≥2 個成員時關閉底層 provider 的 per-attempt retry(只剩一個可試時保留呼叫方 retry)。`stream` 只在第一個事件吐出前能切換(已吐出再切會重播部分輸出)。`maxFailovers` 封頂切換次數,`shouldFailover` 可自訂。
+- **cooldown(雙層,依訊號範圍)**:成員失敗後在到期前被後續請求跳過,到期由路由自然刪除解凍,無背景 timer。冷卻範圍取決於錯誤帶的訊號:
+  - **帳號級**(`resetAt`):絕對 epoch ms、provider 自報的精確重置(如訂閱窗口,本質帳號級、跨所有 model)→ 冷卻**整個 member**(`memberCooldowns` 以 member index 為 key),所有 model 都跳過它,**照值採用、不封頂**。
+  - **per-model**(`retryAfterMs`):相對值、語意可能只限該 model(如 OpenAI TPM)→ 只冷卻 `(member, model)`(`cooldowns` 以 `(member index, model)` 為 key,model 用已去前綴的裸名)——`opus` 被限不影響同帳號的 `sonnet`,**封頂 `maxCooldownMs`(預設 15 分鐘)** 防過長/惡意 `Retry-After`。
+  - 陳舊(已過期)的 `resetAt` 退回 `retryAfterMs`;兩者皆無 → **不冷卻**,只 failover(「偵測不到就不冷卻」——瞬時故障未必是帳號問題)。不做預先冷卻。
+  - 兩層並存:`plan`/`allCoolingError` 經 `coolingUntil` 取兩者中**較晚**的有效到期值判定冷卻,純同步、每成員一次 map 查詢、無背景狀態。
+- **全部冷卻**:若該 model 下所有成員都在冷卻 → 試「最快恢復」的那個作最後一搏(它可能已提早重置),仍失敗則拋明確的 `rate_limit` `CardanError`(訊息含成員數與最快恢復時間,`retryAfterMs` 設為最快恢復剩餘)。`code` 沿用 `rate_limit`,不新增 `ErrorCode`。
+- **刻意不做主動探測子系統**:pool 不持有 timer、不主動回查配額、無 usage-aware hook/`onError`。精確 reset 直接搭在 429 回應上(見下),到期自然解凍即可;主動回查 header 還得發真實請求,對 cooling 帳號正是要避免的。早期曾設計 `/api/oauth/usage` 背景探測,因該端點需 `user:profile` scope(inference-only token 403)且回查需發請求而棄用。
+
+### Anthropic 訂閱限額訊號(`resetAt`)
+
+- **`oauth` 捷徑**:`AnthropicProviderOptions.oauth` 接受裸 token 字串作為 `{ credentials: { accessToken } }` 的捷徑(常見於 `claude setup-token`),完整物件形式保留給需要 refresh token / `onRefresh` 的情況。讓多帳號池 `tokens.map((token) => new AnthropicProvider({ oauth: token }))` 乾淨。
+- **訊號來源(已驗證)**:Messages API 的**回應 header** `anthropic-ratelimit-unified-reset`(代表窗口的 reset,**epoch 秒**)。它出現在每筆回應(含 429),且**不需 `user:profile` scope**——對 inference-only 的 `claude setup-token` 也可讀(用真實 token 實測 200 回應確認:另有 `unified-{5h,7d}-{utilization(0–1),reset,status}`、`unified-status`、`unified-representative-claim` 等)。Claude Code 自己對訂閱限額也是讀這組 header,而非 `retry-after`。
+- **映射**:`AnthropicProvider.httpError` 在 **429** 時把 `anthropic-ratelimit-unified-reset`(秒→ms)寫入通用的 `CardanError.resetAt`;pool 以此設精確、不封頂的**帳號級(整個 member、跨 model)** cooldown。API key 路徑無此 header → `resetAt` 不設,退回 `retryAfterMs`(API key 的 429 一定帶 `Retry-After`)。
+- **`CardanError.resetAt`**:新增的通用欄位(絕對 epoch ms)——「限額重置的絕對時間」,語意跨 provider,任何有 reset header 的 provider 都可填;消費端應照值採用、不像相對 `retryAfterMs` 那樣封頂。
+- **未採用 `/api/oauth/usage`**:該端點(`Utilization` JSON、`utilization` 0–100、per-model 週限額)需 `user:profile` scope,對 setup-token 403。header 路徑已足夠(精確 reset、零額外請求、setup-token 可用),故不採用該端點,也不對外提供 `getUsage`。內部「監控」即由 header→`resetAt` 達成。
 
 ### 長請求與斷線(streaming / background)
 

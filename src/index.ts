@@ -137,6 +137,15 @@ export {
   type XAIModelId,
   type XAIProviderOptions,
 } from "./providers/xai.js";
+export {
+  PoolProvider,
+  createPool,
+  type PoolBehavior,
+  type PoolFailoverInfo,
+  type PoolMember,
+  type PoolMemberInput,
+  type PoolOptions,
+} from "./pool.js";
 
 // ---------------------------------------------------------------------------
 // Unified entry
