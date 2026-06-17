@@ -100,6 +100,7 @@ export { normalizeMessages } from "./normalize.js";
 export { collectStream, collectStreamToMessage } from "./stream.js";
 export {
   AnthropicProvider,
+  type AnthropicExperimentalOptions,
   type AnthropicModel,
   type AnthropicOAuthOptions,
   type AnthropicProviderOptions,

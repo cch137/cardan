@@ -74,6 +74,22 @@ export interface AnthropicOAuthOptions {
   identity?: string;
 }
 
+/**
+ * Experimental, unsupported knobs for local debugging only. Not covered by
+ * semver — any of these may change behavior or be removed without notice, and
+ * they are intentionally undocumented for normal use. Do not ship them.
+ */
+export interface AnthropicExperimentalOptions {
+  /**
+   * Skip injecting the mandatory Claude Code identity system block in OAuth
+   * (subscription) mode. That block is normally *required* for the subscription
+   * grant to be accepted, so enabling this will most likely make the API reject
+   * the request — it exists only to probe what happens when the identity is
+   * withheld. No effect in API-key mode.
+   */
+  omitOAuthIdentity?: boolean;
+}
+
 export interface AnthropicProviderOptions {
   /** Defaults to the `ANTHROPIC_API_KEY` environment variable. */
   apiKey?: string;
@@ -97,6 +113,11 @@ export interface AnthropicProviderOptions {
   retry?: Partial<RetryOptions> | false;
   /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
   timeoutMs?: number;
+  /**
+   * Experimental debugging knobs. Unsupported and not for normal use — see
+   * {@link AnthropicExperimentalOptions}.
+   */
+  experimental?: AnthropicExperimentalOptions;
 }
 
 const DEFAULT_BASE_URL = "https://api.anthropic.com";
@@ -535,7 +556,8 @@ export class AnthropicProvider implements Provider {
       max_tokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
       messages: messages.map(convertMessage),
     };
-    if (this.oauth) {
+    const omitIdentity = this.options.experimental?.omitOAuthIdentity === true;
+    if (this.oauth && !omitIdentity) {
       // Subscription grant requires the identity as the first system block.
       const head = { type: "text", text: this.oauth.identity };
       body.system = system ? [head, { type: "text", text: system }] : [head];
