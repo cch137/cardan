@@ -23,6 +23,12 @@ export interface CardanErrorOptions {
   provider?: string;
   status?: number;
   retryAfterMs?: number;
+  /**
+   * Absolute time (epoch ms) the rate limit resets, when the provider reports it
+   * (e.g. a subscription window reset). Authoritative and exact — consumers
+   * should honor it as-is rather than capping it like a relative `retryAfterMs`.
+   */
+  resetAt?: number;
   raw?: unknown;
   cause?: unknown;
   /** Override the default retryability derived from `code`. */
@@ -35,6 +41,7 @@ export class CardanError extends Error {
   readonly status?: number;
   readonly retryable: boolean;
   readonly retryAfterMs?: number;
+  readonly resetAt?: number;
   /** Raw provider error body, for debugging. */
   readonly raw?: unknown;
 
@@ -46,6 +53,7 @@ export class CardanError extends Error {
     this.status = options.status;
     this.retryable = options.retryable ?? RETRYABLE.has(code);
     this.retryAfterMs = options.retryAfterMs;
+    this.resetAt = options.resetAt;
     this.raw = options.raw;
   }
 }

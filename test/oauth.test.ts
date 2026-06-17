@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import type { OAuthCredentials } from "../src/index.js";
-import { textMessage } from "../src/index.js";
+import { CardanError, textMessage } from "../src/index.js";
 
 const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -80,6 +80,41 @@ test("oauth mode: bearer auth, oauth beta, identity system block, no api key", a
   const system = body.system as Array<{ type: string; text: string }>;
   assert.equal(system[0]!.text, IDENTITY, "identity is the first system block");
   assert.equal(system[1]!.text, "be terse", "user system follows identity");
+});
+
+test("oauth mode: a bare token string is shorthand for credentials.accessToken", async () => {
+  const calls: Call[] = [];
+  const provider = new AnthropicProvider({
+    oauth: "AT", // shorthand for { credentials: { accessToken: "AT" } }
+    fetch: routedFetch({ calls, onToken: () => tokenResponse({}), onMessages: () => messageResponse() }),
+  });
+  await provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "hi")] });
+  assert.equal(calls[0]!.headers["authorization"], "Bearer AT");
+  assert.equal(calls[0]!.headers["x-api-key"], undefined);
+});
+
+test("oauth mode: a 429 surfaces the unified reset as resetAt", async () => {
+  const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
+  const fetch429: typeof globalThis.fetch = async (input) =>
+    String(input).includes("oauth/token")
+      ? tokenResponse({})
+      : new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+          status: 429,
+          headers: {
+            "content-type": "application/json",
+            "anthropic-ratelimit-unified-reset": String(resetEpoch),
+          },
+        });
+  const provider = new AnthropicProvider({ oauth: "AT", fetch: fetch429, retry: false });
+  await assert.rejects(
+    provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "hi")] }),
+    (err: unknown) => {
+      assert.ok(err instanceof CardanError);
+      assert.equal(err.code, "rate_limit");
+      assert.equal(err.resetAt, resetEpoch * 1000);
+      return true;
+    },
+  );
 });
 
 test("oauth mode: no api key required (does not throw)", async () => {

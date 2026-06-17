@@ -101,8 +101,12 @@ export interface AnthropicProviderOptions {
    * rather than pay-per-token API credits. Mutually exclusive with `apiKey`
    * (takes precedence). Bearer auth, the `oauth-2025-04-20` beta, and the
    * required Claude Code identity system block are all applied automatically.
+   *
+   * Pass a bare token string as shorthand for `{ credentials: { accessToken } }`
+   * — handy for a `claude setup-token` token; use the object form when you need
+   * a refresh token, `onRefresh`, etc.
    */
-  oauth?: AnthropicOAuthOptions;
+  oauth?: string | AnthropicOAuthOptions;
   /** Defaults to `https://api.anthropic.com`. */
   baseUrl?: string;
   /** `anthropic-version` header. Defaults to `2023-06-01`. */
@@ -258,6 +262,20 @@ class ClaudeOAuthAuth {
   }
 }
 
+/**
+ * The representative subscription-window reset (epoch ms) from the unified
+ * rate-limit response headers, or `undefined`. These headers ride on every
+ * Messages API response (including the 429), so they work for any OAuth token —
+ * including an inference-only `claude setup-token` — without the `user:profile`
+ * scope the `/api/oauth/usage` endpoint demands.
+ */
+function unifiedResetMs(headers: Headers): number | undefined {
+  const value = headers.get("anthropic-ratelimit-unified-reset");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+}
+
 /** Returns a comma-joined beta header that includes `flag` exactly once. */
 function withBeta(existing: string | undefined, flag: string): string {
   if (!existing) return flag;
@@ -331,7 +349,13 @@ export class AnthropicProvider implements Provider {
   private resolveOAuth(
     options: AnthropicProviderOptions,
   ): ClaudeOAuthAuth | undefined {
-    if (options.oauth) return new ClaudeOAuthAuth(options.oauth, this.fetch);
+    if (options.oauth) {
+      const oauth =
+        typeof options.oauth === "string"
+          ? { credentials: { accessToken: options.oauth } }
+          : options.oauth;
+      return new ClaudeOAuthAuth(oauth, this.fetch);
+    }
     // An explicit API key opts out of the subscription path; only fall back to
     // the env OAuth token when no credential was configured at all.
     if (options.apiKey) return undefined;
@@ -542,6 +566,9 @@ export class AnthropicProvider implements Provider {
       provider: this.name,
       status: response.status,
       retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
+      // subscription quota carries an exact reset (epoch s) in the unified
+      // headers rather than Retry-After; surface it for precise pool cooldowns
+      resetAt: code === "rate_limit" ? unifiedResetMs(response.headers) : undefined,
       raw,
     });
   }
