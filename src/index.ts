@@ -1,17 +1,17 @@
 import { CardanError } from "./errors.js";
 import {
   AnthropicProvider,
-  type AnthropicModel,
+  type AnthropicModelId,
   type AnthropicProviderOptions,
 } from "./providers/anthropic.js";
 import {
   GoogleProvider,
-  type GoogleModel,
+  type GoogleModelId,
   type GoogleProviderOptions,
 } from "./providers/google.js";
 import {
   GroqProvider,
-  type GroqModel,
+  type GroqModelId,
   type GroqProviderOptions,
 } from "./providers/groq.js";
 import {
@@ -20,12 +20,12 @@ import {
 } from "./providers/modal.js";
 import {
   OpenAIProvider,
-  type OpenAIModel,
+  type OpenAIModelId,
   type OpenAIProviderOptions,
 } from "./providers/openai.js";
 import {
   XAIProvider,
-  type XAIModel,
+  type XAIModelId,
   type XAIProviderOptions,
 } from "./providers/xai.js";
 import type {
@@ -102,6 +102,7 @@ export {
   AnthropicProvider,
   type AnthropicExperimentalOptions,
   type AnthropicModel,
+  type AnthropicModelId,
   type AnthropicOAuthOptions,
   type AnthropicProviderOptions,
   type OAuthCredentials,
@@ -109,11 +110,13 @@ export {
 export {
   GoogleProvider,
   type GoogleModel,
+  type GoogleModelId,
   type GoogleProviderOptions,
 } from "./providers/google.js";
 export {
   GroqProvider,
   type GroqModel,
+  type GroqModelId,
   type GroqProviderOptions,
 } from "./providers/groq.js";
 export {
@@ -124,11 +127,13 @@ export {
 export {
   OpenAIProvider,
   type OpenAIModel,
+  type OpenAIModelId,
   type OpenAIProviderOptions,
 } from "./providers/openai.js";
 export {
   XAIProvider,
   type XAIModel,
+  type XAIModelId,
   type XAIProviderOptions,
 } from "./providers/xai.js";
 
@@ -141,11 +146,11 @@ export {
  * passed verbatim to the provider (model names may themselves contain `/`).
  */
 export type ModelId =
-  | `anthropic/${AnthropicModel}`
-  | `google/${GoogleModel}`
-  | `groq/${GroqModel}`
-  | `openai/${OpenAIModel}`
-  | `xai/${XAIModel}`
+  | `anthropic/${AnthropicModelId}`
+  | `google/${GoogleModelId}`
+  | `groq/${GroqModelId}`
+  | `openai/${OpenAIModelId}`
+  | `xai/${XAIModelId}`
   | (`${string}/${string}` & {});
 
 export interface CardanConfig {

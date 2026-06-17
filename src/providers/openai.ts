@@ -37,7 +37,8 @@ import {
   type WebSearchOptions,
 } from "../types.js";
 
-export type OpenAIModel =
+/** Known OpenAI model ids — literal-only, drives editor autocomplete. */
+export type OpenAIModelId =
   | "gpt-5.5"
   | "gpt-5.5-pro"
   | "gpt-5.4"
@@ -47,8 +48,9 @@ export type OpenAIModel =
   | "o3"
   | "o4-mini"
   | "text-embedding-3-small"
-  | "text-embedding-3-large"
-  | (string & {});
+  | "text-embedding-3-large";
+
+export type OpenAIModel = OpenAIModelId | (string & {});
 
 export interface OpenAIProviderOptions {
   /** Defaults to the `OPENAI_API_KEY` environment variable. */

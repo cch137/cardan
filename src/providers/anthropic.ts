@@ -32,12 +32,14 @@ import {
   type WebSearchOptions,
 } from "../types.js";
 
-export type AnthropicModel =
+/** Known Anthropic model ids — literal-only, drives editor autocomplete. */
+export type AnthropicModelId =
   | "claude-fable-5"
   | "claude-opus-4-8"
   | "claude-sonnet-4-6"
-  | "claude-haiku-4-5"
-  | (string & {});
+  | "claude-haiku-4-5";
+
+export type AnthropicModel = AnthropicModelId | (string & {});
 
 /**
  * A Claude.ai subscription OAuth credential set, as stored by the Claude CLI in

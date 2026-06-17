@@ -35,7 +35,8 @@ import {
   type WebCitation,
 } from "../types.js";
 
-export type GroqModel =
+/** Known Groq model ids — literal-only, drives editor autocomplete. */
+export type GroqModelId =
   | "openai/gpt-oss-120b"
   | "openai/gpt-oss-20b"
   | "openai/gpt-oss-safeguard-20b"
@@ -44,8 +45,9 @@ export type GroqModel =
   | "llama-3.1-8b-instant"
   | "meta-llama/llama-4-scout-17b-16e-instruct"
   | "groq/compound"
-  | "groq/compound-mini"
-  | (string & {});
+  | "groq/compound-mini";
+
+export type GroqModel = GroqModelId | (string & {});
 
 export interface GroqProviderOptions {
   /** Defaults to the `GROQ_API_KEY` environment variable. */

@@ -36,13 +36,15 @@ import {
   type WebCitation,
 } from "../types.js";
 
-export type GoogleModel =
+/** Known Google model ids — literal-only, drives editor autocomplete. */
+export type GoogleModelId =
   | "gemini-3.5-flash"
   | "gemini-3.1-pro-preview"
   | "gemini-3.1-flash-lite"
   | "gemini-3-flash-preview"
-  | "gemini-embedding-001"
-  | (string & {});
+  | "gemini-embedding-001";
+
+export type GoogleModel = GoogleModelId | (string & {});
 
 export interface GoogleProviderOptions {
   /** Defaults to `GEMINI_API_KEY`, falling back to `GOOGLE_API_KEY`. */

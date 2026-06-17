@@ -11,7 +11,8 @@ import type {
 } from "../types.js";
 import { OpenAIProvider, type OpenAIResponseBody } from "./openai.js";
 
-export type XAIModel =
+/** Known xAI model ids — literal-only, drives editor autocomplete. */
+export type XAIModelId =
   | "grok-4.3"
   | "grok-4.20-0309-reasoning"
   | "grok-4.20-0309-non-reasoning"
@@ -19,8 +20,9 @@ export type XAIModel =
   | "grok-4-fast-reasoning"
   | "grok-4-fast-non-reasoning"
   | "grok-4-0709"
-  | "grok-code-fast-1"
-  | (string & {});
+  | "grok-code-fast-1";
+
+export type XAIModel = XAIModelId | (string & {});
 
 export interface XAIProviderOptions {
   /** Defaults to the `XAI_API_KEY` environment variable. */
