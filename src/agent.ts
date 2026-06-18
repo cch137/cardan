@@ -77,7 +77,9 @@ export class Agent {
         userOnCall?.(info);
       }),
     );
-    const result = await conversation.ask(input, options);
+    // `options` were already folded into the conversation's defaults by
+    // buildOptions, so ask inherits them — don't pass them a second time.
+    const result = await conversation.ask(input);
     const accumulated: GenerateResult = { ...result, usage: total };
     await this.spec.memory?.observe(accumulated);
     return accumulated;
