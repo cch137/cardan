@@ -407,7 +407,7 @@ export class PoolProvider implements Provider {
 
 /** Cooldown map key for a `(member index, model)` pair. */
 function cooldownKey(index: number, model: string): string {
-  return `${index} ${model}`;
+  return `${index}:${model}`;
 }
 
 export function createPool(options: PoolOptions): PoolProvider {
