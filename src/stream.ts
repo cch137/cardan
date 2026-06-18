@@ -4,6 +4,7 @@ import {
   type FinishReason,
   type GenerateResult,
   type Message,
+  type RateLimitStatus,
   type StreamEvent,
   type TextPart,
   type ThinkingPart,
@@ -23,6 +24,7 @@ export async function collectStream(
   let finishReason: FinishReason = "other";
   let usage = emptyUsage();
   let citations: WebCitation[] | undefined;
+  let rateLimit: RateLimitStatus | undefined;
 
   const last = () => content[content.length - 1];
 
@@ -89,6 +91,7 @@ export async function collectStream(
         finishReason = event.reason;
         usage = event.usage;
         if (event.citations?.length) citations = event.citations;
+        if (event.rateLimit) rateLimit = event.rateLimit;
         break;
     }
   }
@@ -99,6 +102,7 @@ export async function collectStream(
     finishReason,
     usage,
     ...(citations ? { citations } : {}),
+    ...(rateLimit ? { rateLimit } : {}),
   };
 }
 

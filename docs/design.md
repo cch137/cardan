@@ -123,3 +123,4 @@ type StreamEvent =
 - `ThinkingPart` 加 `redacted?: boolean` 表達 Anthropic `redacted_thinking`(signature 欄位存不透明 data)。
 - `ThinkingPart` 加 `id?: string`(stream `thinking_signature` 事件同步加 optional `id`),承載 OpenAI reasoning item id(`rs_…`);stateless 重放需 `id` + `encrypted_content`(存進 `signature`)兩者,缺一即丟棄該 part。
 - `TextPart`/`ToolCallPart` 加 `signature?: string`(stream `tool_call` 事件同步加 optional `signature`),承載 Gemini part 層級 `thoughtSignature`(Gemini 3 function calling 回放缺 signature 會 400)。streaming 時 text part signature 不保留(僅 tool_call 與 thinking 的 signature 流出)。
+- `GenerateResult`/stream `finish` 加 `rateLimit?: RateLimitStatus`(訂閱限額快照),`Provider` 介面加 optional `readonly rateLimit`(最後已知,覆蓋寫入非累加;pool 另有 `rateLimits()`)。來源是回應 header,**純觀測**,與 usage 記帳(`result.usage`,token 花費)分屬兩件事。lowest common denominator,無 header 即 `undefined`;細節見 [providers.md#anthropic](./providers.md#anthropic)。

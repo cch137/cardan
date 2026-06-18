@@ -12,4 +12,5 @@
   - 陳舊(已過期)的 `resetAt` 退回 `retryAfterMs`;兩者皆無 → **不冷卻**,只 failover(偵測不到就不冷卻——瞬時故障未必是帳號問題)。不做預先冷卻。
   - 兩層並存:`coolingUntil` 取兩者中**較晚**的有效到期值判定,純同步、每成員一次 map 查詢、無背景狀態。
 - **全部冷卻**:該 model 下所有成員都在冷卻 → 試「最快恢復」的那個作最後一搏(可能已提早重置),仍失敗拋 `rate_limit` `CardanError`(訊息含成員數與最快恢復時間,`retryAfterMs` 設為最快恢復剩餘)。`code` 沿用 `rate_limit`,不新增 `ErrorCode`。
-- **不做主動探測**:pool 不持 timer、不主動回查配額、無 usage-aware hook/`onError`。精確 reset 搭在 429 回應上(見 [providers.md#anthropic](./providers.md#anthropic)),到期自然解凍;主動回查 header 還得發真實請求,對 cooling 帳號正是要避免的。早期曾設計 `/api/oauth/usage` 背景探測,因需 `user:profile` scope(inference-only token 403)且需發請求而棄用。
+- **不做主動探測 / 預先冷卻**:pool 不持 timer、不主動回查配額、無 usage-aware hook/`onError`。精確 reset 搭在 429 回應上(見 [providers.md#anthropic](./providers.md#anthropic)),到期自然解凍;主動回查 header 還得發真實請求,對 cooling 帳號正是要避免的。早期曾設計 `/api/oauth/usage` 背景探測,因需 `user:profile` scope(inference-only token 403)且需發請求而棄用。
+- **`rateLimits()`(純觀測)**:回傳每成員 `{ label, rateLimit }`(各 provider 最後已知額度快照,見 [providers.md#anthropic](./providers.md#anthropic))。pool 刻意**不**據此避讓——仍有額度的成員提前冷卻會浪費配額,與「只在真實錯誤訊號才冷卻」衝突;要不要調權重/降速由呼叫方決定。

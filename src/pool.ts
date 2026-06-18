@@ -6,6 +6,7 @@ import type {
   GenerateOptions,
   GenerateResult,
   Provider,
+  RateLimitStatus,
   RetryOptions,
   StreamEvent,
 } from "./types.js";
@@ -201,6 +202,20 @@ export class PoolProvider implements Provider {
       this.embed = (o) =>
         this.runWithFailover(o, o.model, (p, opts) => p.embed!(opts));
     }
+  }
+
+  /**
+   * Each member's last-known subscription rate-limit snapshot (see
+   * {@link Provider.rateLimit}), by label — a live view of remaining quota per
+   * account, for observability. The pool itself never acts on these: it only
+   * cools a member on a real rate-limit error (see {@link recordCooldown}),
+   * never on a soft-warning snapshot, so a member with quota left keeps serving.
+   */
+  rateLimits(): Array<{ label: string; rateLimit: RateLimitStatus | undefined }> {
+    return this.members.map((m) => ({
+      label: m.label,
+      rateLimit: m.provider.rateLimit,
+    }));
   }
 
   generate(options: GenerateOptions): Promise<GenerateResult> {

@@ -120,6 +120,46 @@ export function addUsage(target: Usage, add: Usage): void {
 }
 
 // ---------------------------------------------------------------------------
+// Rate limit
+// ---------------------------------------------------------------------------
+
+/**
+ * One subscription rate-limit window's state, as reported by the provider on
+ * every response (no extra request or scope needed). `utilization` is the
+ * fraction (0..1) of the window consumed — the proactive signal — and
+ * `resetAt` (epoch ms) is when it refills.
+ */
+export interface RateLimitWindow {
+  /** Fraction of the window consumed, 0..1. */
+  utilization: number;
+  /** When the window resets, epoch ms. */
+  resetAt: number;
+  /** Provider status for this window, e.g. `allowed` | `allowed_warning` | `rejected`. */
+  status: string;
+}
+
+/**
+ * Subscription rate-limit snapshot parsed from a response's rate-limit headers.
+ * Anthropic (Claude.ai OAuth) reports rolling 5-hour and 7-day windows plus a
+ * "representative" view of whichever is currently binding; other providers may
+ * populate none of it. Lowest common denominator — fields are present only when
+ * the provider reports them. Surfaced so callers (and {@link Provider} pools)
+ * can rotate or throttle *before* hitting a hard rate-limit error.
+ */
+export interface RateLimitStatus {
+  /** Which window is currently binding (e.g. `five_hour` | `seven_day`), if reported. */
+  representative?: string;
+  /** Representative status across windows (the binding window's status). */
+  status?: string;
+  /** Representative window reset, epoch ms (the binding window's reset). */
+  resetAt?: number;
+  /** The rolling 5-hour subscription window. */
+  fiveHour?: RateLimitWindow;
+  /** The rolling 7-day subscription window. */
+  sevenDay?: RateLimitWindow;
+}
+
+// ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------
 
@@ -149,6 +189,8 @@ export type StreamEvent =
       usage: Usage;
       /** Web-search sources gathered this turn, if web search ran. */
       citations?: WebCitation[];
+      /** Subscription rate-limit snapshot from the response headers, if reported. */
+      rateLimit?: RateLimitStatus;
     };
 
 export interface Tool {
@@ -285,6 +327,8 @@ export interface GenerateResult<T = unknown> {
   output?: T;
   /** Web-search sources the model cited, if web search ran. */
   citations?: WebCitation[];
+  /** Subscription rate-limit snapshot from the response headers, if reported. */
+  rateLimit?: RateLimitStatus;
   /** Raw provider response body, for debugging/forward-compat. */
   raw: unknown;
 }
@@ -319,4 +363,11 @@ export interface Provider {
   stream(options: GenerateOptions): AsyncIterable<StreamEvent>;
   /** Only providers that offer embeddings implement this. */
   embed?(options: EmbedOptions): Promise<EmbedResult>;
+  /**
+   * Last-known subscription rate-limit snapshot from the most recent response
+   * that reported it, or `undefined`. A live, overwritten-on-each-request view
+   * of remaining quota — not an accumulator. Only providers that expose
+   * subscription rate-limit headers implement this.
+   */
+  readonly rateLimit?: RateLimitStatus;
 }

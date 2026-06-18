@@ -509,3 +509,81 @@ test("structured output parses and surfaces JSON", async () => {
   });
   assert.deepEqual(result.output, { name: "Jane" });
 });
+
+// Unified subscription rate-limit headers, captured verbatim from a real 200
+// response (epoch-second resets); see experiments/.../ratelimit-probe.ts.
+const RATELIMIT_HEADERS: Record<string, string> = {
+  "anthropic-ratelimit-unified-status": "allowed_warning",
+  "anthropic-ratelimit-unified-reset": "1781781600",
+  "anthropic-ratelimit-unified-representative-claim": "five_hour",
+  "anthropic-ratelimit-unified-5h-utilization": "0.93",
+  "anthropic-ratelimit-unified-5h-status": "allowed_warning",
+  "anthropic-ratelimit-unified-5h-reset": "1781781600",
+  "anthropic-ratelimit-unified-7d-utilization": "0.67",
+  "anthropic-ratelimit-unified-7d-status": "allowed",
+  "anthropic-ratelimit-unified-7d-reset": "1782115200",
+};
+
+test("generate: parses unified rate-limit headers into result.rateLimit", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE, 200, RATELIMIT_HEADERS)]),
+  });
+  const result = await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+  });
+  assert.deepEqual(result.rateLimit, {
+    representative: "five_hour",
+    status: "allowed_warning",
+    resetAt: 1781781600 * 1000,
+    fiveHour: { utilization: 0.93, resetAt: 1781781600 * 1000, status: "allowed_warning" },
+    sevenDay: { utilization: 0.67, resetAt: 1782115200 * 1000, status: "allowed" },
+  });
+});
+
+test("generate: no rate-limit headers leaves result.rateLimit undefined", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)]),
+  });
+  const result = await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+  });
+  assert.equal(result.rateLimit, undefined);
+});
+
+test("stream: surfaces rate-limit headers on the finish event", async () => {
+  const sse =
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":3}}}\n\n' +
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n' +
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n' +
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => new Response(sse, { status: 200, headers: RATELIMIT_HEADERS })]),
+  });
+  const result = await collectStream(
+    provider.stream({ model: "claude-opus-4-8", messages: [textMessage("user", "q")] }),
+  );
+  assert.equal(result.rateLimit?.representative, "five_hour");
+  assert.equal(result.rateLimit?.fiveHour?.utilization, 0.93);
+  assert.equal(result.rateLimit?.resetAt, 1781781600 * 1000);
+});
+
+test("provider.rateLimit exposes the last-known snapshot (overwritten, not accumulated)", async () => {
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE, 200, RATELIMIT_HEADERS)]),
+  });
+  const before = provider.rateLimit;
+  assert.equal(before, undefined); // nothing requested yet
+  await provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "q")] });
+  const after = provider.rateLimit;
+  assert.ok(after, "rateLimit snapshot set after a request");
+  assert.equal(after.fiveHour?.utilization, 0.93);
+  assert.equal(after.resetAt, 1781781600 * 1000);
+});

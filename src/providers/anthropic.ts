@@ -26,6 +26,8 @@ import {
   type GenerateResult,
   type Message,
   type Provider,
+  type RateLimitStatus,
+  type RateLimitWindow,
   type RetryOptions,
   type StreamEvent,
   type Usage,
@@ -263,6 +265,22 @@ class ClaudeOAuthAuth {
   }
 }
 
+/** A rate-limit header carrying epoch *seconds*, converted to epoch ms, or `undefined`. */
+function resetHeaderMs(headers: Headers, name: string): number | undefined {
+  const value = headers.get(name);
+  if (!value) return undefined;
+  const seconds = Number(value);
+  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+}
+
+/** A rate-limit header carrying a number (e.g. utilization 0..1), or `undefined`. */
+function numHeader(headers: Headers, name: string): number | undefined {
+  const value = headers.get(name);
+  if (!value) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 /**
  * The representative subscription-window reset (epoch ms) from the unified
  * rate-limit response headers, or `undefined`. These headers ride on every
@@ -271,10 +289,53 @@ class ClaudeOAuthAuth {
  * scope the `/api/oauth/usage` endpoint demands.
  */
 function unifiedResetMs(headers: Headers): number | undefined {
-  const value = headers.get("anthropic-ratelimit-unified-reset");
-  if (!value) return undefined;
-  const seconds = Number(value);
-  return Number.isFinite(seconds) ? seconds * 1000 : undefined;
+  return resetHeaderMs(headers, "anthropic-ratelimit-unified-reset");
+}
+
+/**
+ * One unified window (`5h` / `7d`) from the rate-limit headers, if any field is
+ * present. Anthropic always sends the three fields together, so a partial window
+ * is not expected; if it ever happens, a missing field coalesces to a neutral
+ * default (`utilization: 0` reads as "unknown / not constrained", `resetAt: 0`).
+ */
+function parseWindow(headers: Headers, prefix: string): RateLimitWindow | undefined {
+  const utilization = numHeader(headers, `anthropic-ratelimit-unified-${prefix}-utilization`);
+  const resetAt = resetHeaderMs(headers, `anthropic-ratelimit-unified-${prefix}-reset`);
+  const status = headers.get(`anthropic-ratelimit-unified-${prefix}-status`) ?? undefined;
+  if (utilization === undefined && resetAt === undefined && status === undefined) {
+    return undefined;
+  }
+  return { utilization: utilization ?? 0, resetAt: resetAt ?? 0, status: status ?? "" };
+}
+
+/**
+ * The subscription rate-limit snapshot from a response's unified headers, or
+ * `undefined` if none are present (e.g. API-key requests don't carry them).
+ * Present on every response, so callers/pools can react before a 429.
+ */
+function parseRateLimit(headers: Headers): RateLimitStatus | undefined {
+  const representative =
+    headers.get("anthropic-ratelimit-unified-representative-claim") ?? undefined;
+  const status = headers.get("anthropic-ratelimit-unified-status") ?? undefined;
+  const resetAt = unifiedResetMs(headers);
+  const fiveHour = parseWindow(headers, "5h");
+  const sevenDay = parseWindow(headers, "7d");
+  if (
+    representative === undefined &&
+    status === undefined &&
+    resetAt === undefined &&
+    !fiveHour &&
+    !sevenDay
+  ) {
+    return undefined;
+  }
+  const out: RateLimitStatus = {};
+  if (representative !== undefined) out.representative = representative;
+  if (status !== undefined) out.status = status;
+  if (resetAt !== undefined) out.resetAt = resetAt;
+  if (fiveHour) out.fiveHour = fiveHour;
+  if (sevenDay) out.sevenDay = sevenDay;
+  return out;
 }
 
 /** Returns a comma-joined beta header that includes `flag` exactly once. */
@@ -334,6 +395,17 @@ export class AnthropicProvider implements Provider {
   private readonly options: AnthropicProviderOptions;
   private readonly fetch: typeof globalThis.fetch;
   private readonly oauth?: ClaudeOAuthAuth;
+  private lastRateLimit?: RateLimitStatus;
+
+  /**
+   * The subscription rate-limit snapshot from the most recent response that
+   * carried the unified headers (OAuth/subscription requests), or `undefined`
+   * if none has been seen yet. A last-known view, overwritten on each such
+   * response — not an accumulator. Read it any time to check remaining quota.
+   */
+  get rateLimit(): RateLimitStatus | undefined {
+    return this.lastRateLimit;
+  }
 
   constructor(options: AnthropicProviderOptions = {}) {
     this.options = options;
@@ -384,6 +456,7 @@ export class AnthropicProvider implements Provider {
     const usage = emptyUsage();
     let finishReason: FinishReason = "other";
     let lastRaw: AnthropicMessageResponse = {};
+    let rateLimit: RateLimitStatus | undefined;
 
     // server-side tools (web search) run a sampling loop server-side; when it
     // hits its iteration cap the response stops with `pause_turn`. Re-send the
@@ -394,6 +467,8 @@ export class AnthropicProvider implements Provider {
         retry,
         options.signal,
       );
+      rateLimit = parseRateLimit(response.headers) ?? rateLimit;
+      if (rateLimit) this.lastRateLimit = rateLimit;
       const raw = (await response.json()) as AnthropicMessageResponse;
       lastRaw = raw;
       for (const block of raw.content ?? []) {
@@ -417,6 +492,7 @@ export class AnthropicProvider implements Provider {
       raw: lastRaw,
     };
     if (citations.length) result.citations = citations;
+    if (rateLimit) result.rateLimit = rateLimit;
     if (options.output && finishReason !== "refusal") {
       result.output = parseStructuredOutput(
         content,
@@ -434,6 +510,7 @@ export class AnthropicProvider implements Provider {
     const messages = body.messages as Array<Record<string, unknown>>;
     const usage = emptyUsage();
     const citations: WebCitation[] = [];
+    let rateLimit: RateLimitStatus | undefined;
 
     for (let turn = 0; turn < MAX_SERVER_TOOL_TURNS; turn++) {
       const response = await withRetry(
@@ -441,6 +518,8 @@ export class AnthropicProvider implements Provider {
         retry,
         options.signal,
       );
+      rateLimit = parseRateLimit(response.headers) ?? rateLimit;
+      if (rateLimit) this.lastRateLimit = rateLimit;
       if (!response.body) {
         throw new CardanError("network", "response has no body", {
           provider: this.name,
@@ -457,6 +536,7 @@ export class AnthropicProvider implements Provider {
           reason: mapStopReason(stopReason),
           usage,
           ...(citations.length ? { citations } : {}),
+          ...(rateLimit ? { rateLimit } : {}),
         };
         return;
       }
@@ -468,6 +548,7 @@ export class AnthropicProvider implements Provider {
       reason: "other",
       usage,
       ...(citations.length ? { citations } : {}),
+      ...(rateLimit ? { rateLimit } : {}),
     };
   }
 
