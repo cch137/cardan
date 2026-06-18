@@ -119,77 +119,49 @@ c.defaults.model = "openai/gpt-5.4"; // switch model for all later turns
 
 `fork(overrides?)` branches a conversation: the copy shares the client/defaults but gets an independent transcript, so diverging turns never touch the original — use it before fanning work out in parallel (a shared mutable transcript would corrupt).
 
-### Flow
+### Agent
 
-`createFlow<State>()(config?)` is a tiny runner for multi-step work over a shared typed state. There is no graph to declare — a **step** is just an async function, and it decides what runs next by returning `goto(nextStep, patch?)`. Branching, loops, and fan-out live in ordinary code (`if`, recursion, an array of steps); a step that returns without a `goto` ends its branch. No edge table, no `END` sentinel.
+`cardan.agent(spec)` builds a reusable identity — `{ name, system?, model?, tools?, memory? }` — layered over `Conversation`. The agent holds no runtime of its own; it builds conversations on demand.
 
-A full pipeline — screen → investigate → report — showing a self-loop, intra-step parallelism, structured output, and ending by returning without a `goto`:
+`run(input, opts?)` runs one closed task: recall memory → `ask` (auto tool-loop if the agent has tools) → observe → return. Its result's `usage` is the **accumulated** total across every generate the run made (tool-loop rounds included), so reading it gives the task's full cost — unlike a bare `ask`, whose `usage` is only the last turn.
+
+`conversation(opts?)` returns a fresh `Conversation` pre-configured with the agent's identity, for when you want to drive the turns yourself — mid-task or conditional steering is just `ask` between `if`s. It does **not** apply `memory` (the observe timing is undefined under manual driving).
 
 ```ts
-import { createFlow, goto, parallel, withConversations } from "cardan";
-import type { ConversationContext, FlowEvent, Step } from "cardan";
-import { z } from "zod";
-
-type State = {
-  candidates: Event[];
-  picked: string[];
-  reports: Record<string, Report>;
-  attempt: number;
-};
-
-const flow = createFlow<State>()({
-  maxSteps: 25,                                       // cap supersteps (loop guard)
-  reducers: { reports: (a, b) => ({ ...a, ...b }) },  // merge concurrent writes to `reports`
-  extendCtx: withConversations(cardan),               // every step gets ctx.conversation(...)
+const analyst = cardan.agent({
+  name: "analyst",
+  system: "You are a terse market analyst.",
+  model: "anthropic/claude-opus-4-8",
+  tools: [search],
+  memory,                                   // optional; see below
 });
 
-// 1) Screen candidates. If none are picked, loop back to retry (bounded by `attempt`).
-const screen: Step<State, ConversationContext> = async (s, ctx) => {
-  const c = ctx.conversation({ model: "anthropic/claude-opus-4-8", label: "screen" });
-  const res = await c.ask(`Pick the noteworthy events:\n${format(s.candidates)}`, {
-    output: { schema: z.object({ ids: z.array(z.string()) }) },
-  });
-  const picked = (res.output as { ids: string[] }).ids;
-  if (picked.length === 0 && s.attempt < 2) {
-    return goto(screen, { attempt: s.attempt + 1 });  // self-loop = retry
-  }
-  return goto(investigate, { picked });               // route on to the next step
-};
+const { text, usage } = await analyst.run("Summarize today's ETH moves.");
 
-// 2) Investigate each picked item concurrently — fan out *inside* one step with
-//    parallel(). Each item gets its own conversation, so transcripts don't collide;
-//    every ctx.conversation call surfaces as an `llm` flow event tagged "inv <id>".
-const investigate: Step<State, ConversationContext> = async (s, ctx) => {
-  const entries = await parallel(s.picked, async (id, _i, signal) => {
-    const c = ctx.conversation({ model: "anthropic/claude-opus-4-8", label: `inv ${id}` });
-    await c.ask(`Research ${id}.`, { tools: [search], compact: true, signal });
-    const res = await c.ask("Emit the report.", { output: { schema: reportSchema }, signal });
-    return [id, res.output as Report] as const;
-  }, { concurrency: 4, signal: ctx.signal });           // ≤ 4 in flight; signal threads into each ask
-  return goto(report, { reports: Object.fromEntries(entries) });
-};
-
-// 3) Publish and stop — returning without a goto ends the flow.
-const report: Step<State> = async (s) => {
-  await publish(s.reports);
-};
-
-const onEvent = (e: FlowEvent) => console.log(`${e.type} ${e.name ?? ""}`);
-const final = await flow.run(screen, { candidates, picked: [], reports: {}, attempt: 0 }, { onEvent });
+// or drive the turns yourself for mid-task steering:
+const conv = analyst.conversation();
+const draft = await conv.ask("Draft the thesis.");
+if (offTrack(draft.text)) await conv.ask("Too broad — focus on L2 flows.");
+const final = await conv.ask("Finalize it.");
 ```
 
-Routing lives in the step: return `goto(next, patch?)` to continue, `goto([a, b], patch?)` to fan out (those steps run in parallel next superstep), or a plain patch / nothing to stop. Loops are a step that `goto`s itself; conditional routing is an `if`/`switch` choosing the next step. Execution is by superstep — steps scheduled together run concurrently on the same state snapshot, their patches merge at the barrier (a reducer is required for any key two steps write at once, else it throws), then the next set runs. `maxSteps` caps the superstep count (the loop guard); `concurrency` caps in-flight tasks inside one `parallel()` call.
+`memory` is what an agent carries *between* conversations (a transcript is within one). It's the lightest possible hook — `{ recall(): string; observe(result): void }` — called by `run` (recall before, observe after); where and how to store is yours. No vector store. An agent without `memory` is a stateless identity.
 
-**Step-level fan-out** is for branches with *different* logic that converge on a join — steps that `goto` the same function run once on the merged state:
+**Orchestration is ordinary async** — there is no flow/graph layer to learn. Multi-step is `await`, branching is `if`, loops are `while`, and fan-out is `parallel(items, fn, { concurrency, signal })` (concurrency-limited, order-preserving, fail-fast, cancellable). Give each branch its own `agent`/`conversation` (or `conversation.fork()`) so transcripts don't collide:
 
 ```ts
-const plan:       Step<S> = () => goto([searchWeb, searchDocs]);          // fan out
-const searchWeb:  Step<S> = async () => goto(synthesize, { web:  await web()  });
-const searchDocs: Step<S> = async () => goto(synthesize, { docs: await docs() });
-const synthesize: Step<S> = (s) => ({ answer: combine(s.web, s.docs) }); // joins, runs once
+// screen → investigate N concurrently → publish
+const picked = await screener.run(`Pick the noteworthy events:\n${format(candidates)}`, {
+  output: { schema: z.object({ ids: z.array(z.string()) }) },
+});
+const reports = await parallel((picked.output as { ids: string[] }).ids, async (id, _i, signal) => {
+  const conv = investigator.conversation();
+  await conv.ask(`Research ${id}.`, { tools: [search], compact: true, signal });
+  const res = await conv.ask("Emit the report.", { output: { schema: reportSchema }, signal });
+  return [id, res.output as Report] as const;
+}, { concurrency: 4 }); // ≤ 4 in flight; signal threads into each ask
+await publish(Object.fromEntries(reports));
 ```
-
-**Parallel, two ways**: do the same work over N items *inside* a step with `parallel()` (the common case — concurrency-limited, order-preserving); use step-level fan-out only when branches have *different downstream routing*. `onEvent` receives `step:start` / `step:end` / `error`, plus `llm` events for every call made through `ctx.conversation`.
 
 ### Pool
 
@@ -228,7 +200,7 @@ await cardan.generate({ model: "anthropic/claude-opus-4-8", messages }); // → 
 await cardan.generate({ model: "openai/gpt-5.5", messages });            // → the single provider
 ```
 
-Because a pool is just a `Provider`, it also nests: a `PoolProvider` can itself be a member of another pool (e.g. group several account pools), and the `Conversation`/`Flow` layers accept it wherever they accept a `Cardan` or provider.
+Because a pool is just a `Provider`, it also nests: a `PoolProvider` can itself be a member of another pool (e.g. group several account pools), and the `Conversation`/`Agent` layers accept it wherever they accept a `Cardan` or provider.
 
 - **Rotation**: a fixed, evenly-interleaved round-robin built from member `weight`s (default 1); each request takes the next slot.
 - **Failover**: on a `rate_limit | auth | server | network | timeout` error it switches to the next *distinct* member and retries (the pool owns this retry, so per-attempt provider retry is disabled while ≥2 members are tried). `maxFailovers` caps switches; `shouldFailover` customizes which errors qualify. For `stream`, a switch is only possible before the first event is emitted.

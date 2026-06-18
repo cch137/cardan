@@ -27,7 +27,7 @@
 
 ## Non-goals
 
-- **不做 agent framework**:無 loop、無 memory、無 planning。
+- **不做重 agent framework**:提供輕量 `Agent`(可複用身份 + 可選 memory + tool 迴圈),但不做 planning、不做 vector memory / RAG、不做編排引擎(編排用原生 async + `parallel`)、不做 durable runtime;`Agent` 不自帶 runtime/scheduler。
 - **不做 prompt 管理**:無模板、無 prompt registry。
 - **不做 RAG**:無 vector store、無 chunking。
 - **不做 gateway/proxy**:cardan 是 client 端的庫,不是服務。
@@ -204,15 +204,14 @@ type StreamEvent =
 - **`compact` 是可替換的壓縮器**(`Compactor = (region: Message[]) => Message[]`),迴圈後改寫它附加的往返,避免原始工具輸出(如抓取的頁面)被後續回合重放——既省 context 也避開內容過濾。`compact:true` 用預設 `redactToolResults`:**保留 tool_call/tool_result 結構、只把 result 內容換成佔位字串**——讓模型仍看見「結論是靠工具得出的」,不會誤以為是天生知識(直接 splice 掉整段會造成這種幻覺)。要更激進可用內建 `dropToolRounds`(只留結論)或自寫(如 LLM 摘要);自訂壓縮器需維持 call/result 配對,否則靠 normalize 補懸空結果。
 - **型別貫穿(零依賴)**:`ZodLikeSchema<T>` 的 `parse` 回傳型別承載輸出型別,`Infer<S>` 由此結構性還原而不 import zod。`defineTool(spec, run)` 讓 `run` 的 args 從 schema 推導(zod→具體型別、純 JSON Schema→`unknown`)。結構化輸出只是 `ask` 的 `output.schema` 選項,`res.output` 即解析後的值,要靜態型別自行 `as Infer<typeof schema>`——cardan 是通用模組,不為「輸出 JSON」另設專用方法或假定它是主要用法。
 - **telemetry 解耦**:cardan 自身不 log;`onCall(info)` 每次 generate 觸發一次(成功帶 `finishReason`、失敗帶 `error`),`tag`/`model`/`ms`/`usage`/`citations` 由消費端自訂格式與路由。
-- **`fork(overrides?)`**:複製 transcript(+ defaults)、共用 client,得到可獨立發散的分支對話。並行 fan-out 前必須 fork,否則多分支同時 mutate 同一個 `messages` 會損毀(superstep 對 state 唯讀,但 Conversation 可變)。
+- **`fork(overrides?)`**:複製 transcript(+ defaults)、共用 client,得到可獨立發散的分支對話。並行 fan-out(如 `parallel()` 內各分支)前必須 fork,否則多分支同時 mutate 同一個 `messages` 會損毀。
 
-### Flow / Agent(編排層)
+### Agent(身份層)
 
-- **刻意不做圖**:沒有 `edges` 表、沒有 `END` 標記、沒有 node 名稱註冊表——這些都是 LangGraph 的影子。一個 **step 就是 async 函式**,靠回傳 `goto(next, patch?)` 決定下一步,控制流(分支、循環、fan-out)寫在普通程式碼裡。返回不帶 `goto`(或 void/patch)即結束該分支。借的只剩「共享型別 state + superstep 讓並行合併具決定性 + 帶上限循環」;丟掉 checkpointer、Pregel channels、interrupt/HITL、subgraph、reducer 宣告儀式、langchain 耦合。
-- **三層、互不耦合**:`flow.ts`(泛型 async step 執行器,完全不認得 LLM)、`conversation.ts`(完全不認得 flow)、`agent.ts`(唯一同時認得兩者的薄膠水)。`flow.ts` 只在 `extendCtx` 開一個擴充縫——核心只 `Object.assign` 擴充物件進 ctx,不知道 `conversation` 是什麼;`withConversations(cardan)` 由膠水層供應,把 `ctx.conversation(...)` 的 `onCall` 自動轉為 `{type:"llm", name, iteration, call}` flow 事件。純 flow 使用者 `X=unknown`,零負擔。
-- **執行 = BSP superstep**:維護 frontier(step 函式集合);每 superstep 對「同一份 state 快照」並行跑,蒐集 `Partial<S>` patches,在 barrier 用 reducer 合併,再從各 step 的 `goto.next` 算下個 frontier(以**函式參照**去重)。**`goto` 同一函式的分支自動 join**(跑一次)。不等長分支的真同步刻意不做——那種並行收進「step 內 `parallel()`」處理(這是讓執行器保持小的關鍵取捨)。去重/join 用**函式參照**(`Set<Step>`)而非名稱,故 minify 改名不影響收斂正確性。
-- **fail-fast 且喚醒兄弟**:同 superstep 的 step 用 `Promise.all`,任一拋錯即拒絕整個 run;執行器以內部 `AbortController` 在拋錯當下 abort,讓**仍在飛的兄弟 step**經 `ctx.signal` 收到中止(它們 spawn 的 conversation / `parallel()` 才能取消),而非白跑到底。呼叫端的 `signal` 也併入這個 composed signal,故 step 只需認一個 `ctx.signal`。
-- **決定性合併**:每個被寫的 key,單寫入=覆寫(或有 reducer 就 fold);**多個並行 step 寫同一 key 但沒宣告 reducer → 直接拋 `FlowError`**,把不確定性在執行期擋下而非靜默 last-write-wins。
-- **路由即程式碼**:沒有 router/edge 概念。`goto(next, patch?)` 繼續、`goto([a,b], patch?)` fan-out、回傳 patch/void 停止;循環 = step `goto` 自己,條件路由 = `if` 選下一個 step。step 身分(tracing 用)取自函式名(匿名 → `"(anonymous)"`);這只影響事件標籤,minify 後會退化成短名,**不影響去重/join**(用參照)。
-- **循環安全**:`maxSteps`(預設 25)封頂 superstep 數,超過拋 `FlowError`;state 為純物件,要持久化自行序列化(checkpoint/resume 不內建)。
-- **`parallel(items, fn, {concurrency, signal})`**:泛型限流並行 map(零 LLM/flow 依賴),保序、fail-fast、可中止。step 內 fan-out 的主力,只有「分支有不同後續路由」時才改用 step 層 fan-out。
+- **移除 Flow**:原 superstep/goto 執行器(`flow.ts`)已下架。LLM 編排的「狀態」活在 `Conversation`、「並行」用 `parallel()`、順序/分支/迴圈用原生 `async`/`if`/`while` 就夠;superstep 唯一獨有的「決定性合併」反而逼出不等長分支對齊的複雜度,且全 repo 無外部消費,故整層移除。
+- **`Agent` = 可複用身份 + 可選 memory,層疊在 `Conversation` 上**,本身零 runtime——`run`/`conversation()` 當場建一個 `Conversation` 做事。`agent.ts` 是身份層與 conversation 之間唯一的縫;`conversation.ts` 不認得 agent。
+- **`run` vs `conversation()`**:`run(input)` 是封閉一次性任務(recall memory → `ask`(有 tools 自動迴圈)→ observe → 回傳);`conversation()` 回傳預配身份的 `Conversation` 讓呼叫端自驅多輪(中途/條件式引導 = `ask` 之間插 `if`)。`conversation()` 刻意不套 memory——自驅下 observe 時機未定。
+- **`run` 回傳累計 usage**:`Conversation` 不跨輪累加(usage 只在 `onCall`),`ask` / tool 迴圈的回傳值只是最後一輪。`run` 注入一個累加 `onCall`(`emptyUsage()` + 逐輪 `addUsage`,並轉發使用者的 `onCall`)、以累計值覆寫回傳,讓「讀回傳值 = 整次任務成本」成正確預設;`addUsage` 提到 `types.ts` 共用。
+- **memory 是身份的跨會話狀態**(transcript 是會話內的):最輕注入鉤子 `{ recall(): string; observe(result): void }`,`run` 前 recall 併入 system、後 observe。cardan 只定何時呼叫,存哪/怎麼壓縮由呼叫方;**不做 vector**。無 `memory` 的 agent 是無狀態純身份。
+- **編排回歸原生**:`parallel(items, fn, {concurrency, signal})`(零 LLM 依賴、保序、fail-fast、可中止)做節點內資料並行;不同分支各取自己的 `agent`/`conversation`(或 `conversation.fork()`)避免 transcript 衝突。沒有 flow/graph 層要學。
+- **多 agent `Discussion`(共享記錄 + 視角投影)為未來方向**,本次未做:落地前需解投影保多模態、strip 歷史 thinking、tool 迴圈抽無狀態 helper、並行發言歸併等。
