@@ -666,7 +666,13 @@ export class AnthropicProvider implements Provider {
     const body: Record<string, unknown> = {
       model: options.model,
       max_tokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-      messages: messages.map(convertMessage),
+      // Keep an assistant turn's thinking blocks only while a client tool call
+      // is still in flight (the turn is immediately followed by tool results),
+      // where Anthropic requires them; drop them from completed turns — see
+      // convertMessage.
+      messages: messages.map((message, i) =>
+        convertMessage(message, messages[i + 1]?.role === "tool"),
+      ),
     };
     const omitIdentity = this.options.experimental?.omitOAuthIdentity === true;
     if (this.oauth && !omitIdentity) {
@@ -939,14 +945,32 @@ function extractBlockCitations(
 }
 
 
-function convertMessage(message: Message): Record<string, unknown> {
+/**
+ * Converts one normalized message to Anthropic wire format.
+ *
+ * `keepThinking` gates replaying the turn's thinking blocks. Anthropic rejects
+ * *modified* thinking blocks in an assistant turn ("`thinking` … blocks in the
+ * latest assistant message cannot be modified"), and a web-search turn cannot
+ * be replayed faithfully: its interleaved `server_tool_use` /
+ * `web_search_tool_result` blocks don't round-trip through the generic schema
+ * (they're dropped on the way in), so keeping the thinking blocks but losing
+ * their surrounding blocks reads as a modified turn. Thinking from a *completed*
+ * turn is optional, so we drop it; we keep it only for an in-flight client
+ * tool-use turn — one immediately followed by tool results — where the API
+ * requires the thinking that led to the tool call.
+ */
+function convertMessage(
+  message: Message,
+  keepThinking: boolean,
+): Record<string, unknown> {
   // tool results travel in user-role messages on Anthropic
   const role = message.role === "tool" ? "user" : message.role;
+  const parts = keepThinking
+    ? message.content
+    : message.content.filter((part) => part.type !== "thinking");
   return {
     role,
-    content: message.content
-      .map(convertRequestPart)
-      .filter((part) => part !== null),
+    content: parts.map(convertRequestPart).filter((part) => part !== null),
   };
 }
 

@@ -447,6 +447,71 @@ test("web search: resumes transparently on pause_turn", async () => {
   assert.equal(result.usage.output.total, 13);
 });
 
+test("thinking: dropped when replaying a completed assistant turn", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  // A finished research turn: web search drops its server_tool_use /
+  // web_search_tool_result blocks, leaving thinking + text. Replaying the
+  // thinking would 400 ("thinking … blocks cannot be modified"), so a completed
+  // turn's thinking must be dropped on the next turn.
+  const messages: Message[] = [
+    textMessage("user", "research"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", text: "reasoned", signature: "sig" },
+        { type: "text", text: "answer" },
+      ],
+    },
+    textMessage("user", "assess"),
+  ];
+  await provider.generate({
+    model: "claude-opus-4-8",
+    messages,
+    reasoning: { effort: "high" },
+  });
+  const sent = captured[0]!.body.messages as Array<{ role: string; content: unknown[] }>;
+  assert.deepEqual(sent[1]!.content, [{ type: "text", text: "answer" }]);
+});
+
+test("thinking: preserved for an in-flight client tool-use turn", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  // The thinking that led to a tool call must be echoed back unchanged while the
+  // call is in flight (assistant turn immediately followed by tool results).
+  const messages: Message[] = [
+    textMessage("user", "q"),
+    {
+      role: "assistant",
+      content: [
+        { type: "thinking", text: "reasoned", signature: "sig" },
+        { type: "tool_call", id: "c1", name: "f", args: { x: 1 } },
+      ],
+    },
+    {
+      role: "tool",
+      content: [{ type: "tool_result", callId: "c1", result: "ok" }],
+    },
+  ];
+  await provider.generate({
+    model: "claude-opus-4-8",
+    messages,
+    tools: [{ name: "f", parameters: { type: "object" } }],
+    reasoning: { effort: "high" },
+  });
+  const sent = captured[0]!.body.messages as Array<{ role: string; content: unknown[] }>;
+  assert.deepEqual(sent[1]!.content, [
+    { type: "thinking", thinking: "reasoned", signature: "sig" },
+    { type: "tool_use", id: "c1", name: "f", input: { x: 1 } },
+  ]);
+});
+
 test("web search: stream surfaces citations and resumes on pause_turn", async () => {
   const pauseStream = [
     'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}\n\n',
