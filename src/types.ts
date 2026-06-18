@@ -107,6 +107,18 @@ export function emptyUsage(): Usage {
   };
 }
 
+/** Adds `add`'s totals and detail breakdowns into `target`, in place. Used to
+ *  accumulate usage across multiple generate calls (tool-loop rounds, an
+ *  Agent's whole `run`, streamed turn fragments). */
+export function addUsage(target: Usage, add: Usage): void {
+  target.input.total += add.input.total;
+  target.output.total += add.output.total;
+  for (const [key, value] of Object.entries(add.input.details))
+    target.input.details[key] = (target.input.details[key] ?? 0) + value;
+  for (const [key, value] of Object.entries(add.output.details))
+    target.output.details[key] = (target.output.details[key] ?? 0) + value;
+}
+
 // ---------------------------------------------------------------------------
 // Generation
 // ---------------------------------------------------------------------------

@@ -18,6 +18,7 @@ import {
   parseToolArgs,
 } from "../util.js";
 import {
+  addUsage,
   emptyUsage,
   type ContentPart,
   type FinishReason,
@@ -856,15 +857,6 @@ function extractBlockCitations(
   }
 }
 
-/** Sums one usage tally into another (for `pause_turn` resumes billed separately). */
-function addUsage(target: Usage, add: Usage): void {
-  target.input.total += add.input.total;
-  target.output.total += add.output.total;
-  for (const [key, value] of Object.entries(add.input.details))
-    target.input.details[key] = (target.input.details[key] ?? 0) + value;
-  for (const [key, value] of Object.entries(add.output.details))
-    target.output.details[key] = (target.output.details[key] ?? 0) + value;
-}
 
 function convertMessage(message: Message): Record<string, unknown> {
   // tool results travel in user-role messages on Anthropic

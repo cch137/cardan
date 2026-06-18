@@ -38,6 +38,7 @@ import type {
 } from "./types.js";
 import type { Infer, SchemaInput } from "./schema.js";
 import { Conversation, type ConversationOptions } from "./conversation.js";
+import { Agent, type AgentSpec } from "./agent.js";
 
 export type {
   ContentPart,
@@ -78,24 +79,7 @@ export {
   redactToolResults,
   type ToolHandler,
 } from "./conversation.js";
-export {
-  createFlow,
-  Flow,
-  type FlowConfig,
-  type FlowCtx,
-  FlowError,
-  type FlowEvent,
-  type Goto,
-  goto,
-  type RunOptions,
-  type Step,
-  type StepResult,
-} from "./flow.js";
-export {
-  type ConversationContext,
-  type ConversationFactory,
-  withConversations,
-} from "./agent.js";
+export { Agent, type AgentSpec, type Memory } from "./agent.js";
 export { parallel } from "./concurrency.js";
 export { normalizeMessages } from "./normalize.js";
 export { collectStream, collectStreamToMessage } from "./stream.js";
@@ -234,6 +218,13 @@ export class Cardan {
   /** Start a stateful {@link Conversation} bound to this client's config. */
   conversation(options: ConversationOptions): Conversation {
     return new Conversation(this, options);
+  }
+
+  /** Build an {@link Agent}: a reusable identity (+ optional cross-session memory)
+   *  over this client. The agent has no runtime of its own — it builds
+   *  Conversations on demand. */
+  agent(spec: AgentSpec): Agent {
+    return new Agent(this, spec);
   }
 
   embed(options: Prefixed<EmbedOptions>): Promise<EmbedResult> {
