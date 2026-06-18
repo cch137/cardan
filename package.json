@@ -64,8 +64,7 @@
     }
   },
   "files": [
-    "dist",
-    "DESIGN.md"
+    "dist"
   ],
   "engines": {
     "node": ">=20"

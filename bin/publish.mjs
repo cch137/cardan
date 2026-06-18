@@ -244,7 +244,7 @@ function checkPackageJson(pkg) {
   if (pkg.private) problems.push('"private": true blocks publishing');
 
   const files = Array.isArray(pkg.files) ? pkg.files : [];
-  for (const required of ["dist", "DESIGN.md"]) {
+  for (const required of ["dist"]) {
     if (!files.includes(required)) problems.push(`"files" must include "${required}"`);
   }
 
@@ -259,7 +259,7 @@ function checkPackageJson(pkg) {
 
 function checkRequiredFiles() {
   step("Checking required files exist");
-  const missing = ["README.md", "LICENSE", "DESIGN.md"].filter(
+  const missing = ["README.md", "LICENSE"].filter(
     (f) => !existsSync(resolve(PKG_DIR, f)),
   );
   if (missing.length) fail(`missing files: ${missing.join(", ")}`);
@@ -532,7 +532,6 @@ function inspectTarball() {
     "package.json",
     "README.md",
     "LICENSE",
-    "DESIGN.md",
     "dist/index.js",
     "dist/index.d.ts",
   ];
