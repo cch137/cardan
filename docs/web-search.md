@@ -1,5 +1,6 @@
 # Web search(內置 / server-side 工具)
 
+- **`webSearch` 只開「搜尋」工具,不含「抓指定 URL 全文」**:server 端搜尋並讀取結果頁內容、回傳帶引用的答案,但讀哪些頁、讀多深由模型與供應商決定(cardan 僅能以 `contextSize`/domain 過濾/`maxUses` 有限引導)。它不會主動抓某個指定 URL 的全文——那是各家獨立的 web fetch 工具(如 Anthropic `web_fetch`),cardan 目前未接。
 - **統一入口是 first-class 欄位 `webSearch?: boolean | WebSearchOptions`,不走通用 `tools`**:web search 是 server-side 工具(供應商自己跑搜尋、回傳含引用成品),不像一般 `Tool` round-trip 回呼叫方,語意完全不同。`WebSearchOptions` 是跨供應商最小正規化集合(`maxUses`、`allowedDomains`、`blockedDomains`、`userLocation`、`contextSize`);各 adapter 只映射自己支援的、忽略其餘,獨有旗標走 `providerOptions`。
 - **輸出統一為來源清單**:`GenerateResult.citations?: WebCitation[]`(`{url, title?, snippet?}`),streaming 在 `finish` 事件帶 `citations`,`collectStream` 一併收斂。這是五家都能穩定抽取的最小公因數;inline span 映射(OpenAI 字元 index、Gemini segment、Anthropic block citation)差異太大,只保留來源清單,細節留 `raw`。`addCitations` 以 URL 去重,先到者佔位、後到者補滿缺漏 title/snippet。
 - **不支援即報錯**:無 web search 能力的模型請求 `webSearch` 報 `invalid_request`(各 adapter 以能力表/regex 閘控);逃生口透過 `providerOptions` 覆寫 body。
