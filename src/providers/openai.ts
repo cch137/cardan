@@ -134,6 +134,13 @@ export class OpenAIProvider implements Provider {
   readonly name: string = "openai";
   protected readonly defaultBaseUrl: string = DEFAULT_BASE_URL;
   protected readonly apiKeyEnv: string = "OPENAI_API_KEY";
+  /**
+   * Whether the provider reports `reasoning_tokens` *on top of* `output_tokens`
+   * (xAI: `total = input + output + reasoning`) rather than *inside* it (OpenAI:
+   * reasoning is a subset of `output_tokens`). When true, {@link mapUsage} folds
+   * reasoning into `output.total` so billing reflects the true output count.
+   */
+  protected readonly reasoningIsAdditive: boolean = false;
   private readonly options: OpenAIProviderOptions;
   private readonly fetch: typeof globalThis.fetch;
 
@@ -517,7 +524,7 @@ export class OpenAIProvider implements Provider {
       message: { role: "assistant", content },
       text: partsToText(content),
       finishReason: deriveFinishReason(raw),
-      usage: mapUsage(raw.usage),
+      usage: mapUsage(raw.usage, this.reasoningIsAdditive),
       raw,
     };
     const citations = this.extractCitations(raw);
@@ -620,7 +627,7 @@ export class OpenAIProvider implements Provider {
             {
               type: "finish",
               reason: deriveFinishReason(response),
-              usage: mapUsage(response.usage),
+              usage: mapUsage(response.usage, this.reasoningIsAdditive),
               ...(citations.length ? { citations } : {}),
             },
           ],
@@ -997,7 +1004,10 @@ function responseFailure(
   });
 }
 
-function mapUsage(usage: OpenAIUsage | undefined): Usage {
+function mapUsage(
+  usage: OpenAIUsage | undefined,
+  reasoningIsAdditive = false,
+): Usage {
   const result = emptyUsage();
   if (!usage) return result;
   // input_tokens already includes cached tokens
@@ -1006,7 +1016,12 @@ function mapUsage(usage: OpenAIUsage | undefined): Usage {
   if (cached) result.input.details.cache_read = cached;
   result.output.total = usage.output_tokens ?? 0;
   const reasoning = usage.output_tokens_details?.reasoning_tokens;
-  if (reasoning) result.output.details.reasoning = reasoning;
+  if (reasoning) {
+    result.output.details.reasoning = reasoning;
+    // xAI reports reasoning_tokens separately from output_tokens; fold it in so
+    // output.total is the true billable count. OpenAI already includes it.
+    if (reasoningIsAdditive) result.output.total += reasoning;
+  }
   return result;
 }
 

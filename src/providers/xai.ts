@@ -78,6 +78,9 @@ export class XAIProvider extends OpenAIProvider {
   override readonly name: string = "xai";
   protected override readonly defaultBaseUrl: string = "https://api.x.ai";
   protected override readonly apiKeyEnv: string = "XAI_API_KEY";
+  // xAI reports reasoning_tokens on top of output_tokens (total = input +
+  // output + reasoning), unlike OpenAI where reasoning is a subset of output.
+  protected override readonly reasoningIsAdditive: boolean = true;
 
   constructor(options: XAIProviderOptions = {}) {
     super(options);

@@ -74,7 +74,52 @@ test("targets api.x.ai with stateless Responses defaults", async () => {
   assert.deepEqual(result.message.content, [{ type: "text", text: "hi" }]);
   assert.equal(result.usage.input.total, 50);
   assert.deepEqual(result.usage.input.details, { cache_read: 20 });
+  // xAI reports reasoning_tokens on top of output_tokens: total output = 10 + 3.
+  assert.equal(result.usage.output.total, 13);
   assert.deepEqual(result.usage.output.details, { reasoning: 3 });
+});
+
+test("folds reasoning_tokens into output.total (xAI additive accounting)", async () => {
+  // Numbers from xAI's REST reference Responses example:
+  // input 32 + output 9 + reasoning 110 = total 151.
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([
+      () =>
+        jsonResponse({
+          ...RESPONSE_FIXTURE,
+          usage: {
+            input_tokens: 32,
+            output_tokens: 9,
+            output_tokens_details: { reasoning_tokens: 110 },
+          },
+        }),
+    ]),
+  });
+  const result = await provider.generate({
+    model: "grok-4.3",
+    messages: [textMessage("user", "q")],
+  });
+  assert.equal(result.usage.input.total, 32);
+  assert.equal(result.usage.output.total, 119); // 9 + 110
+  assert.deepEqual(result.usage.output.details, { reasoning: 110 });
+});
+
+test("streaming finish folds reasoning_tokens into output.total", async () => {
+  const sse = [
+    'data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}\n\n',
+    'data: {"type":"response.output_text.delta","item_id":"msg_1","delta":"yo"}\n\n',
+    'data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"yo"}]}],"usage":{"input_tokens":32,"output_tokens":9,"output_tokens_details":{"reasoning_tokens":110}}}}\n\n',
+  ].join("");
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => new Response(sse, { status: 200 })]),
+  });
+  const result = await collectStream(
+    provider.stream({ model: "grok-4.3", messages: [textMessage("user", "q")] }),
+  );
+  assert.equal(result.usage.output.total, 119); // 9 + 110
+  assert.deepEqual(result.usage.output.details, { reasoning: 110 });
 });
 
 test("keeps sampling params on reasoning models", async () => {
