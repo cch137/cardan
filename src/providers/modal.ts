@@ -35,11 +35,19 @@ import {
 /** Models are whatever the caller deployed; there is no known-model list. */
 export type ModalModel = string;
 
+/**
+ * Default deployment root: Modal's us-west-2 OpenAI-compatible gateway. cardan
+ * appends `/v1/chat/completions` (and `/v1/embeddings`), so this must NOT include
+ * a trailing `/v1`. Override per deployment via `baseUrl` or `MODAL_BASE_URL`.
+ */
+const DEFAULT_BASE_URL = "https://api.us-west-2.modal.direct";
+
 export interface ModalProviderOptions {
   /**
-   * Deployment URL (e.g. `https://workspace--app-serve.modal.run`). Required —
-   * every Modal deployment has its own URL. Defaults to the `MODAL_BASE_URL`
-   * environment variable.
+   * Deployment root URL (e.g. `https://workspace--app-serve.modal.run`); cardan
+   * appends `/v1/chat/completions`, so do NOT include a trailing `/v1`. Resolved
+   * as `baseUrl` > `MODAL_BASE_URL` > the us-west-2 Modal gateway default
+   * ({@link DEFAULT_BASE_URL}).
    */
   baseUrl?: string;
   /**
@@ -209,14 +217,8 @@ export class ModalProvider implements Provider {
   // -------------------------------------------------------------------------
 
   private baseUrl(): string {
-    const url = this.options.baseUrl ?? readEnv("MODAL_BASE_URL");
-    if (!url) {
-      throw new CardanError(
-        "invalid_request",
-        "missing Modal deployment URL: pass `baseUrl` or set MODAL_BASE_URL",
-        { provider: this.name },
-      );
-    }
+    const url = this.options.baseUrl ?? readEnv("MODAL_BASE_URL") ??
+      DEFAULT_BASE_URL;
     return url.replace(/\/+$/, "");
   }
 

@@ -93,14 +93,15 @@ test("targets the deployment's chat completions endpoint with both auth schemes"
   assert.deepEqual(result.usage.output.details, { reasoning: 5 });
 });
 
-test("requires a deployment URL", async () => {
+test("defaults to the us-west-2 Modal gateway when no URL is set", async () => {
+  const captured: Captured[] = [];
   const provider = new ModalProvider({
-    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)]),
+    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)], captured),
   });
-  await assert.rejects(
-    provider.generate({ model: "m", messages: [textMessage("user", "q")] }),
-    (error: unknown) =>
-      error instanceof CardanError && error.code === "invalid_request",
+  await provider.generate({ model: "m", messages: [textMessage("user", "q")] });
+  assert.equal(
+    captured[0]!.url,
+    "https://api.us-west-2.modal.direct/v1/chat/completions",
   );
 });
 
