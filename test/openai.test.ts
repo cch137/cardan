@@ -700,3 +700,24 @@ test("background: stream resumes a dropped SSE via starting_after", async () => 
   assert.deepEqual(result.message.content, [{ type: "text", text: "hello" }]);
   assert.equal(result.finishReason, "stop");
 });
+
+test("cache: forwards cache.key as prompt_cache_key (and omits when unset)", async () => {
+  const captured: Captured[] = [];
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    cache: { key: "conv-123" },
+  });
+  assert.equal(captured[0]!.body.prompt_cache_key, "conv-123");
+
+  await provider.generate({
+    model: "gpt-5.5",
+    messages: [textMessage("user", "q")],
+    cache: true,
+  });
+  assert.equal("prompt_cache_key" in captured[1]!.body, false);
+});

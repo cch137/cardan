@@ -338,6 +338,21 @@ function parseRateLimit(headers: Headers): RateLimitStatus | undefined {
   return out;
 }
 
+/**
+ * The `cache_control` marker for an enabled {@link GenerateOptions.cache}, or
+ * `null` when caching is off. `ttl: "1h"` selects the longer-lived (and
+ * costlier to write) breakpoint; the default is the 5-minute ephemeral cache.
+ */
+function resolveCacheControl(
+  cache: GenerateOptions["cache"],
+): { type: "ephemeral"; ttl?: "1h" } | null {
+  if (!cache) return null;
+  const ttl = typeof cache === "object" ? cache.ttl : undefined;
+  return ttl === "1h"
+    ? { type: "ephemeral", ttl: "1h" }
+    : { type: "ephemeral" };
+}
+
 /** Returns a comma-joined beta header that includes `flag` exactly once. */
 function withBeta(existing: string | undefined, flag: string): string {
   if (!existing) return flag;
@@ -674,13 +689,36 @@ export class AnthropicProvider implements Provider {
         convertMessage(message, messages[i + 1]?.role === "tool"),
       ),
     };
+    // Prompt caching: place one breakpoint on the last system block (caches
+    // tools + system) and one on the last message's last block (incremental
+    // conversation caching). Two breakpoints, well under the 4 max. The system
+    // must be rendered as a block array to carry cache_control, so caching
+    // forces the array form even in API-key mode.
+    const cacheControl = resolveCacheControl(options.cache);
     const omitIdentity = this.options.experimental?.omitOAuthIdentity === true;
     if (this.oauth && !omitIdentity) {
       // Subscription grant requires the identity as the first system block.
-      const head = { type: "text", text: this.oauth.identity };
-      body.system = system ? [head, { type: "text", text: system }] : [head];
+      const head: Record<string, unknown> = { type: "text", text: this.oauth.identity };
+      const blocks: Record<string, unknown>[] = system
+        ? [head, { type: "text", text: system }]
+        : [head];
+      if (cacheControl) {
+        const last = blocks[blocks.length - 1];
+        if (last) last.cache_control = cacheControl;
+      }
+      body.system = blocks;
     } else if (system) {
-      body.system = system;
+      body.system = cacheControl
+        ? [{ type: "text", text: system, cache_control: cacheControl }]
+        : system;
+    }
+    if (cacheControl) {
+      const msgs = body.messages as Array<{ content?: unknown }>;
+      const lastContent = msgs[msgs.length - 1]?.content;
+      if (Array.isArray(lastContent) && lastContent.length) {
+        (lastContent[lastContent.length - 1] as Record<string, unknown>)
+          .cache_control = cacheControl;
+      }
     }
     if (stream) body.stream = true;
     if (options.stopSequences?.length)

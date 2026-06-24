@@ -652,3 +652,54 @@ test("provider.rateLimit exposes the last-known snapshot (overwritten, not accum
   assert.equal(after.fiveHour?.utilization, 0.93);
   assert.equal(after.resetAt, 1781781600 * 1000);
 });
+
+test("cache: places cache_control on last system block and last message", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("system", "be terse"), textMessage("user", "q")],
+    cache: true,
+  });
+  const body = captured[0]!.body;
+  const system = body.system as Array<Record<string, unknown>>;
+  assert.ok(Array.isArray(system), "system rendered as block array when caching");
+  assert.deepEqual(system.at(-1)!.cache_control, { type: "ephemeral" });
+  const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+  const lastParts = messages.at(-1)!.content;
+  assert.deepEqual(lastParts.at(-1)!.cache_control, { type: "ephemeral" });
+});
+
+test("cache: ttl '1h' sets the 1-hour breakpoint", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("system", "s"), textMessage("user", "q")],
+    cache: { ttl: "1h" },
+  });
+  const system = captured[0]!.body.system as Array<Record<string, unknown>>;
+  assert.deepEqual(system.at(-1)!.cache_control, { type: "ephemeral", ttl: "1h" });
+});
+
+test("cache: off by default — system stays a string, no cache_control", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  await provider.generate({
+    model: "claude-opus-4-8",
+    messages: [textMessage("system", "be terse"), textMessage("user", "q")],
+  });
+  const body = captured[0]!.body;
+  assert.equal(body.system, "be terse");
+  const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+  assert.equal(messages.at(-1)!.content.at(-1)!.cache_control, undefined);
+});

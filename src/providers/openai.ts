@@ -391,6 +391,11 @@ export class OpenAIProvider implements Provider {
       body.background = true;
       body.store = true;
     }
+    // Prompt caching is automatic on the Responses API; a stable cache key just
+    // pins repeat requests to the same cached prefix to raise the hit rate.
+    const cacheKey =
+      typeof options.cache === "object" ? options.cache.key : undefined;
+    if (cacheKey) body.prompt_cache_key = cacheKey;
 
     if (options.providerOptions) Object.assign(body, options.providerOptions);
     if (

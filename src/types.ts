@@ -240,6 +240,46 @@ export interface WebCitation {
   snippet?: string;
 }
 
+/**
+ * Prompt-caching controls. Caching reuses the computation of a repeated prompt
+ * prefix to cut input cost and latency. **Providers differ in what this needs:**
+ *
+ * - **Anthropic** is the only provider that requires *client-side* opt-in — the
+ *   adapter places `cache_control` breakpoints on the last system block and the
+ *   last message so a growing conversation caches its stable prefix. `ttl` picks
+ *   the breakpoint lifetime (`"5m"` default, `"1h"` for longer-lived prefixes,
+ *   which costs more to write — 2× vs 1.25× base input).
+ * - **OpenAI / xAI** cache automatically; `key` is forwarded as the Responses
+ *   API `prompt_cache_key` (both run on that API) to pin repeat requests to the
+ *   same cached prefix and raise the hit rate. `ttl` is ignored.
+ * - **Gemini / Groq / Modal** cache automatically with nothing to configure;
+ *   this option is a no-op (cache hits still surface in `usage`).
+ *
+ * Caching is **off unless this is set** — `true` enables it with defaults.
+ *
+ * **Scope — stateless prefix caching only.** Every provider above caches by
+ * matching a repeated prompt *prefix* the client resends each request; the
+ * client holds no cache state. Gemini *also* offers explicit, *named* context
+ * caching (`caches.create()` → a `CachedContent` resource you reference and
+ * lifecycle-manage, billed by per-hour storage over its TTL). That is a
+ * stateful management-plane feature, not a per-request hint, so it is
+ * deliberately out of scope here (cardan stays lean — like files/batch). If you
+ * need it, create the cache yourself and pass `providerOptions:
+ * { cachedContent: "cachedContents/…" }`; cardan won't manage its lifecycle or
+ * bill its storage. Should a real need arise, add a separate `caches.*` surface
+ * rather than overloading this option.
+ */
+export interface CacheOptions {
+  /** Breakpoint lifetime. Anthropic only; `"5m"` (default) or `"1h"`. */
+  ttl?: "5m" | "1h";
+  /**
+   * Stable cache key to route repeat requests to the same cached prefix (e.g. a
+   * conversation id), sent as the Responses API `prompt_cache_key`. OpenAI / xAI
+   * only; other providers ignore it.
+   */
+  key?: string;
+}
+
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface RetryOptions {
@@ -269,6 +309,12 @@ export interface GenerateOptions<S extends SchemaInput = SchemaInput> {
    * runs the searches and returns citations on the result.
    */
   webSearch?: boolean | WebSearchOptions;
+  /**
+   * Enable prompt caching. `true` uses defaults; pass {@link CacheOptions} to
+   * set the TTL (Anthropic) or a cache key (OpenAI/xAI). Off when omitted. Most
+   * providers cache automatically — see {@link CacheOptions} for what each does.
+   */
+  cache?: boolean | CacheOptions;
   /** Structured output: constrain the response to a JSON schema. */
   output?: { schema: S };
   maxOutputTokens?: number;

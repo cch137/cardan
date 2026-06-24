@@ -4,6 +4,11 @@
 
 ## Anthropic
 
+prompt caching(唯一需 client 標記的 provider):
+
+- **`cache` 旗標**:cardan 通用 `cache` 選項在 Anthropic 放兩個 `cache_control` breakpoint——**最後一個 system block**(快取 tools+system)與**最後一則訊息的最後一個 content block**(對話增量快取),共 2 個遠低於 4 上限。開快取時 system 強制改 block 陣列形式(API key 模式亦然)以掛 `cache_control`;OAuth 模式 breakpoint 落在 identity 之後的 systemText block。`cache: { ttl: "1h" }`→`{ type: "ephemeral", ttl: "1h" }`(寫入 2× 基礎 input 價、存活 1h),預設 5m(寫入 1.25×);讀取一律 0.1×。低於模型最小可快取長度(Opus 4.8 = 1024 tokens、Haiku 4.5 = 4096)會被靜默忽略、不報錯。`cache` 未設則行為與改動前**逐 byte 相同**(system 維持字串、無 `cache_control`)。
+- **usage**:`input_tokens`(不含快取)+ `cache_read_input_tokens` + `cache_creation_input_tokens` 三者相加為 `input.total`;後兩者另記 `input.details.cache_read`/`cache_write`。**唯一**有 cache write 成本的 provider。
+
 訂閱限額訊號(`resetAt`):
 
 - **`oauth` 捷徑**:`AnthropicProviderOptions.oauth` 接受裸 token 字串作為 `{ credentials: { accessToken } }` 捷徑(常見於 `claude setup-token`),完整物件形式保留給需要 refresh token / `onRefresh` 的情況。讓多帳號池 `tokens.map((t) => new AnthropicProvider({ oauth: t }))` 乾淨。
@@ -20,6 +25,7 @@
 - tools 與 structured output 用 `parametersJsonSchema`/`responseJsonSchema`(完整 JSON Schema,zod 4 輸出可直接用),不用 OpenAPI 子集的 `parameters`/`responseSchema`。
 - thinking 分代:`gemini-3*` 用 `thinkingLevel`(effort low/medium/high→同名,xhigh/max→high;`enabled:false`→minimal,無法完全關閉),`gemini-2.x` 用 `thinkingBudget`(low 1024 / medium 8192 / high+ 24576;`enabled:false`→0)。
 - `functionResponse.response` 必須是 JSON object:object 原樣透傳,其他值包成 `{ result: value }`,`isError` 包成 `{ error: string }`。
+- prompt caching:**cardan 只用隱式快取**(2.5+ 全自動,讀取 0.1×,**無 storage、無 write fee**),`cache` 選項 no-op,`usageMetadata.cachedContentTokenCount`→`cache_read`(已含在 `input.total`,且隱式不回報任何 creation token,故 cache_write 恆 0)。**顯式** context cache(`caches.create()`/CachedContent)另有**時間維度 storage 費**($/1M tokens/小時 × TTL,如 2.5 Pro $4.50、Flash $1.00)——與 Anthropic 的 per-token write 倍率結構不同;cardan 不建立顯式快取故不可達,per-token 計費模型也無法表達時間積分成本(若未來採用需另立 storage 維度)。
 
 ## OpenAI
 
@@ -28,12 +34,14 @@
 - tools 一律送 `strict: false`(strict 模式要求子集 schema,會弄壞任意 schema);structured output(`text.format`)送 `strict: true`,schema 符合子集是呼叫方責任。
 - reasoning:effort `max`→`xhigh`(上限),`enabled: false`→`effort: "none"`(僅 gpt-5.1+;舊模型省略 `reasoning`);啟用帶 `summary: "auto"` 取得可見 thinking。
 - `function_call_output` 無 error 旗標:`isError` 的 tool_result 包成 `{"error": …}` JSON 字串。
+- prompt caching 全自動(無寫入成本、≥1024 tokens 自動生效),cardan `cache` 選項僅把 `cache.key`→`prompt_cache_key`(穩定 key 提高命中率,例如 conversation id);`ttl` 忽略。讀取折扣**逐模型不同**(gpt-5.x 0.1×、o3 0.25×、gpt-4o/o1 0.5×),`input_tokens_details.cached_tokens`→`cache_read`(已含在 `input.total`)。
 
 ## xAI
 
 - 走 Responses API(Chat Completions 已 legacy),與 OpenAI Responses 線上相容(`store: false` + `include`、`text.format`、function calling、相同 SSE):`XAIProvider` 繼承 `OpenAIProvider`,差異收斂在 protected hooks(baseUrl、`XAI_API_KEY`、採樣參數、reasoning 映射)。
 - reasoning effort 只接受 `none`/`low`/`medium`/`high`(`xhigh`/`max` 封頂 `high`;僅 grok-4.3+,舊模型省略 `reasoning`);不送 `summary`——xAI 對 reasoning 模型一律回 detailed summary。grok 模型(含 reasoning)保留 `temperature`/`top_p`。
 - 無 embeddings:`embed` 報 `invalid_request`。
+- prompt caching 全自動;Responses API 同樣吃 `prompt_cache_key`,故 `cache.key` 經繼承的 OpenAI `buildRequestBody` 直接生效(免額外 header)。讀取折扣逐模型不同(grok-4.3 約 0.16×),`input_tokens_details.cached_tokens`→`cache_read`。
 
 ## Groq
 
@@ -52,3 +60,4 @@
 - 送 `max_tokens`(不送 `max_completion_tokens`)以最大化自部署相容性;`stopSequences`→`stop` 正常支援;structured output 走 `response_format: { type: "json_schema" }`。
 - streaming 帶 `stream_options: { include_usage: true }`;不支援的舊伺服器 usage 記 0。tool call 以 `index` 聚合分段 arguments,缺 id 以 `cardan_call_` 合成。
 - `embed` 打 `/v1/embeddings`,僅部署 embedding 模型時可用。
+- prompt caching:vLLM/SGLang 自動 prefix cache,`cache` 選項 no-op;Modal 按**算力**計費(無 token 價),`prompt_tokens_details.cached_tokens`→`cache_read`(已含在 `input.total`),轉售計價由上層自定。
