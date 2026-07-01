@@ -73,7 +73,7 @@ test("builds request: system hoist, tool results, defaults, headers", async () =
   ];
 
   await provider.generate({
-    model: "claude-sonnet-4-6",
+    model: "claude-haiku-4-5",
     messages,
     temperature: 0.5,
     tools: [{ name: "f", description: "d", parameters: { type: "object" } }],
@@ -118,18 +118,24 @@ test("drops sampling params on models that reject them", async () => {
     apiKey: "sk-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
-  await provider.generate({
-    model: "claude-opus-4-8",
-    messages: [textMessage("user", "q")],
-    temperature: 0.5,
-    topP: 0.9,
-    reasoning: { enabled: true, effort: "high" },
-  });
-  const body = captured[0]!.body;
-  assert.equal(body.temperature, undefined);
-  assert.equal(body.top_p, undefined);
-  assert.deepEqual(body.thinking, { type: "adaptive" });
-  assert.deepEqual(body.output_config, { effort: "high" });
+  // Opus 4.7+/4.8 and the 5-generation (fable/mythos/sonnet/haiku) reject
+  // temperature/top_p; the adapter drops them instead of failing the request.
+  for (const model of ["claude-opus-4-8", "claude-sonnet-5"]) {
+    await provider.generate({
+      model,
+      messages: [textMessage("user", "q")],
+      temperature: 0.5,
+      topP: 0.9,
+      reasoning: { enabled: true, effort: "high" },
+    });
+  }
+  assert.equal(captured.length, 2);
+  for (const { body } of captured) {
+    assert.equal(body.temperature, undefined);
+    assert.equal(body.top_p, undefined);
+    assert.deepEqual(body.thinking, { type: "adaptive" });
+    assert.deepEqual(body.output_config, { effort: "high" });
+  }
 });
 
 test("reasoning: effort alone enables thinking; enabled:false disables", async () => {

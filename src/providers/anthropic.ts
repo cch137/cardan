@@ -39,7 +39,7 @@ import {
 export type AnthropicModelId =
   | "claude-fable-5"
   | "claude-opus-4-8"
-  | "claude-sonnet-4-6"
+  | "claude-sonnet-5"
   | "claude-haiku-4-5";
 
 export type AnthropicModel = AnthropicModelId | (string & {});
@@ -362,10 +362,16 @@ function withBeta(existing: string | undefined, flag: string): string {
 }
 
 /**
- * Models that reject sampling parameters (`temperature`, `top_p`); the
- * adapter drops them instead of failing the request.
+ * Models that reject sampling params (`temperature`, `top_p`) with a 400, so the
+ * adapter drops them rather than fail. A coarse `claude-<name>-<major>(-<minor>)?`
+ * gate by family that matches every version of the reasoning lines (fable,
+ * mythos, sonnet, opus), so new releases need no edit. Haiku is excluded — its
+ * current line still accepts sampling. This is a preliminary check, not a
+ * version oracle: it doesn't distinguish a specific version, so a superseded
+ * opus/sonnet 4.x id also matches; anything it misjudges surfaces the real API
+ * error to the caller.
  */
-const NO_SAMPLING_PARAMS = /^claude-(fable|mythos)-5|^claude-opus-4-(7|8)/;
+const NO_SAMPLING_PARAMS = /^claude-(?:fable|mythos|sonnet|opus)-\d+(?:-\d+)?$/;
 
 /** GA server-side web-search tool. Same result/citation wire shape as later versions. */
 const WEB_SEARCH_TOOL_VERSION = "web_search_20250305";
