@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { AnthropicProvider } from "../src/providers/anthropic.js";
 import { CardanError, collectStream, textMessage } from "../src/index.js";
-import type { Message } from "../src/index.js";
+import type { Message, StreamEvent } from "../src/index.js";
 
 interface Captured {
   url: string;
@@ -395,8 +395,15 @@ test("web search: extracts citations from results and text blocks", async () => 
     messages: [textMessage("user", "q")],
     webSearch: true,
   });
-  // server_tool_use / web_search_tool_result blocks drop out of content
-  assert.deepEqual(result.message.content, [{ type: "text", text: "answer" }]);
+  // server_tool_use / web_search_tool_result blocks drop out of content; the
+  // answer text carries its backing sources anchored to the claim
+  assert.deepEqual(result.message.content, [
+    {
+      type: "text",
+      text: "answer",
+      citations: [{ url: "https://a.com", title: "A", snippet: "snippet" }],
+    },
+  ]);
   // result + text citation merge into one entry with the richest fields
   assert.deepEqual(result.citations, [
     { url: "https://a.com", title: "A", snippet: "snippet" },
@@ -560,6 +567,57 @@ test("web search: stream surfaces citations and resumes on pause_turn", async ()
   assert.deepEqual(result.citations, [{ url: "https://a.com", title: "A" }]);
   assert.equal(result.usage.input.total, 30);
   assert.equal(result.usage.output.total, 10);
+});
+
+test("web search: stream anchors citations to the cited text run", async () => {
+  // two text blocks: the first is backed by a source, the second is not. The
+  // citation must pin to the first run and not bleed into the second.
+  const stream = [
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cited claim"}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://a.com","title":"A","cited_text":"snippet"}}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+    'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}\n\n',
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" and more"}}\n\n',
+    'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}\n\n',
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":6}}\n\n',
+    'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+  ].join("");
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([
+      () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } }),
+    ]),
+  });
+  const events: StreamEvent[] = [];
+  for await (const e of provider.stream({
+    model: "claude-opus-4-8",
+    messages: [textMessage("user", "q")],
+    webSearch: true,
+  })) {
+    events.push(e);
+  }
+  // a text_citations event fires exactly once, for the cited block
+  const cite = events.filter((e) => e.type === "text_citations");
+  assert.equal(cite.length, 1);
+  assert.deepEqual((cite[0] as { citations: unknown }).citations, [
+    { url: "https://a.com", title: "A", snippet: "snippet" },
+  ]);
+  // collection splits into a cited run and a clean trailing run
+  const result = await collectStream(
+    (async function* () {
+      yield* events;
+    })(),
+  );
+  assert.deepEqual(result.message.content, [
+    {
+      type: "text",
+      text: "cited claim",
+      citations: [{ url: "https://a.com", title: "A", snippet: "snippet" }],
+    },
+    { type: "text", text: " and more" },
+  ]);
 });
 
 test("structured output parses and surfaces JSON", async () => {

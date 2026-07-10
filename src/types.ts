@@ -15,6 +15,13 @@ export interface TextPart {
    * the same provider; other providers ignore it.
    */
   signature?: string;
+  /**
+   * Web sources backing this run of text, when the provider anchors citations
+   * to answer spans (Anthropic web search). Present only on the cited run; the
+   * full de-duplicated set is also on {@link GenerateResult.citations}. Replay
+   * to the provider ignores this field.
+   */
+  citations?: WebCitation[];
 }
 
 export interface ImagePart {
@@ -177,6 +184,14 @@ export type StreamEvent =
    * further deltas into a signed part.
    */
   | { type: "text_delta"; text: string; signature?: string }
+  /**
+   * Web sources backing the visible text emitted since the last text break.
+   * Providers that anchor citations to answer spans (Anthropic) emit this when
+   * a cited text block closes; it closes the open text part so the sources stay
+   * pinned to the claim they back. The same sources are also aggregated into the
+   * `finish` event's flat `citations` list.
+   */
+  | { type: "text_citations"; citations: WebCitation[] }
   /** A run of thinking-summary text; `signature` closes the part (see above). */
   | { type: "thinking_delta"; text: string; signature?: string }
   /** Emitted when a thinking block closes with a replay signature. */

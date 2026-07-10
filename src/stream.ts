@@ -32,10 +32,14 @@ export async function collectStream(
     switch (event.type) {
       case "text_delta": {
         const part = last();
-        // a signed text part is closed: never merge further deltas into it,
-        // and never merge two separately signed parts together
+        // a signed or cited text part is closed: never merge further deltas
+        // into it, and never merge two separately signed parts together
         let target: TextPart;
-        if (part?.type === "text" && part.signature === undefined) {
+        if (
+          part?.type === "text" &&
+          part.signature === undefined &&
+          part.citations === undefined
+        ) {
           part.text += event.text;
           target = part;
         } else {
@@ -43,6 +47,17 @@ export async function collectStream(
           content.push(target);
         }
         if (event.signature !== undefined) target.signature = event.signature;
+        break;
+      }
+      case "text_citations": {
+        // pin the sources to the open text part (the claim they back); it is
+        // now closed, so the next text_delta starts a fresh part
+        const part = last();
+        if (part?.type === "text" && part.citations === undefined) {
+          part.citations = event.citations;
+        } else {
+          content.push({ type: "text", text: "", citations: event.citations });
+        }
         break;
       }
       case "thinking_delta": {

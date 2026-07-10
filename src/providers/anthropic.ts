@@ -888,6 +888,13 @@ export class AnthropicProvider implements Provider {
             } else if (block.type === "thinking") {
               const signature = String(block.signature ?? "");
               if (signature) yield { type: "thinking_signature", signature };
+            } else if (block.type === "text") {
+              // Anchor the block's sources to the text it backs: closes the
+              // open text part so downstream collectors pin them to this claim.
+              const blockCites = textBlockCitations(block as AnthropicContentBlock);
+              if (blockCites.length) {
+                yield { type: "text_citations", citations: blockCites };
+              }
             }
             extractBlockCitations(block as AnthropicContentBlock, citations);
             rawBlocks.push(block);
@@ -973,19 +980,29 @@ function extractBlockCitations(
         ]);
       }
     }
-  } else if (block.type === "text" && Array.isArray(block.citations)) {
-    for (const c of block.citations as Array<Record<string, unknown>>) {
-      if (c?.url) {
-        addCitations(out, [
-          {
-            url: String(c.url),
-            ...(c.title ? { title: String(c.title) } : {}),
-            ...(c.cited_text ? { snippet: String(c.cited_text) } : {}),
-          },
-        ]);
-      }
+  } else if (block.type === "text") {
+    addCitations(out, textBlockCitations(block));
+  }
+}
+
+/**
+ * Maps the citations Anthropic attaches to an answer text block into cardan
+ * {@link WebCitation}s (url + title + the quoted source span). Returns [] for
+ * blocks without citations.
+ */
+function textBlockCitations(block: AnthropicContentBlock): WebCitation[] {
+  if (block.type !== "text" || !Array.isArray(block.citations)) return [];
+  const out: WebCitation[] = [];
+  for (const c of block.citations as Array<Record<string, unknown>>) {
+    if (c?.url) {
+      out.push({
+        url: String(c.url),
+        ...(c.title ? { title: String(c.title) } : {}),
+        ...(c.cited_text ? { snippet: String(c.cited_text) } : {}),
+      });
     }
   }
+  return out;
 }
 
 
@@ -1078,8 +1095,14 @@ function convertResponseBlock(
   block: AnthropicContentBlock,
 ): ContentPart | null {
   switch (block.type) {
-    case "text":
-      return { type: "text", text: String(block.text ?? "") };
+    case "text": {
+      const cites = textBlockCitations(block);
+      return {
+        type: "text",
+        text: String(block.text ?? ""),
+        ...(cites.length ? { citations: cites } : {}),
+      };
+    }
     case "thinking":
       return {
         type: "thinking",
