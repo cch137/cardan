@@ -111,7 +111,7 @@ await c.ask("Research the topic and conclude.", { tools: [search], compact: true
 const res = await c.ask("Emit the final report as JSON.", { output: { schema: reportSchema } });
 const report = res.output as Infer<typeof reportSchema>;
 
-c.defaults.model = "openai/gpt-5.6-terra"; // switch model for all later turns
+c.defaults.model = "openai/gpt-5.4"; // switch model for all later turns
 ```
 
 `ask` adds a user turn, generates, appends the reply, returns the `GenerateResult`; with `tools` it loops (`maxRounds` caps it, forcing a tool-free conclusion on the last round). Structured output is a plain option (`output.schema`) — `res.output` holds the parsed value; cast it with `Infer<typeof schema>` for the static type. `output` and `tools` can't combine in one `ask` (structured output is constrained decoding, which blocks tool calls, so `ask` throws) — run the tool loop first, then ask again with `output`. cardan logs nothing itself: pass `onCall` for per-call telemetry (`tag`, `model`, `ms`, `usage`, `citations`, `finishReason` on success / `error` on failure).
@@ -198,7 +198,7 @@ const cardan = createCardan({
 });
 
 await cardan.generate({ model: "anthropic/claude-opus-4-8", messages }); // → the pool
-await cardan.generate({ model: "openai/gpt-5.6-sol", messages });        // → the single provider
+await cardan.generate({ model: "openai/gpt-5.5", messages });            // → the single provider
 ```
 
 A pool also nests: a `PoolProvider` can itself be a member of another pool (e.g. group several account pools), and the `Conversation`/`Agent` layers accept it wherever they accept a `Cardan` or provider.

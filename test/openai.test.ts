@@ -39,7 +39,7 @@ const RESPONSE_FIXTURE = {
   id: "resp_1",
   object: "response",
   status: "completed",
-  model: "gpt-5.6-sol",
+  model: "gpt-5.5",
   output: [
     {
       type: "message",
@@ -83,7 +83,7 @@ test("builds request: input items, tool replay, defaults, headers", async () => 
   ];
 
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages,
     maxOutputTokens: 2000,
     tools: [{ name: "f", description: "d", parameters: { type: "object" } }],
@@ -132,14 +132,14 @@ test("drops sampling params on reasoning models, keeps them on chat models", asy
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     temperature: 0.5,
     topP: 0.9,
     reasoning: { enabled: true, effort: "max" },
   });
   await provider.generate({
-    model: "gpt-5.6-sol-chat-latest",
+    model: "gpt-5.5-chat-latest",
     messages: [textMessage("user", "q")],
     temperature: 0.5,
   });
@@ -156,7 +156,7 @@ test("thinking parts without id or signature are not replayed", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [
       textMessage("user", "q"),
       {
@@ -204,7 +204,7 @@ test("parses response: parts, finish reason, usage details", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
   });
   assert.deepEqual(result.message.content, [
@@ -232,7 +232,7 @@ test("incomplete response maps to length finish reason", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
   });
   assert.equal(result.finishReason, "length");
@@ -256,7 +256,7 @@ test("maps HTTP errors and detects context length", async () => {
     ),
   });
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     retry: { maxRetries: 1, initialDelayMs: 1, maxDelayMs: 5 },
   });
@@ -279,7 +279,7 @@ test("maps HTTP errors and detects context length", async () => {
     ]),
   });
   await assert.rejects(
-    failing.generate({ model: "gpt-5.6-sol", messages: [textMessage("user", "q")] }),
+    failing.generate({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
     (error: unknown) =>
       error instanceof CardanError &&
       error.code === "context_length" &&
@@ -316,7 +316,7 @@ test("streams: deltas, reasoning signature with id, tool calls, finish usage", a
     ]),
   });
   const result = await collectStream(
-    provider.stream({ model: "gpt-5.6-sol", messages: [textMessage("user", "q")] }),
+    provider.stream({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
   );
   assert.deepEqual(result.message.content, [
     { type: "thinking", text: "hmm", signature: "enc_1", id: "rs_1" },
@@ -339,7 +339,7 @@ test("stream failure events raise CardanError", async () => {
   });
   await assert.rejects(
     collectStream(
-      provider.stream({ model: "gpt-5.6-sol", messages: [textMessage("user", "q")] }),
+      provider.stream({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
     ),
     (error: unknown) => error instanceof CardanError && error.code === "server",
   );
@@ -369,7 +369,7 @@ test("structured output sets text.format and parses JSON", async () => {
   });
   const schema = { type: "object", properties: { name: { type: "string" } } };
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "extract")],
     output: { schema },
   });
@@ -408,7 +408,7 @@ test("structured output picks the final part when a reasoning model emits drafts
   });
   const schema = { type: "object", properties: { name: { type: "string" } } };
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "extract")],
     output: { schema },
   });
@@ -434,7 +434,7 @@ test("refusal content maps to refusal finish reason", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     output: { schema: { type: "object" } },
   });
@@ -488,7 +488,7 @@ test("web search: injects web_search tool with filters, context, and location", 
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     webSearch: {
       allowedDomains: ["example.com"],
@@ -551,7 +551,7 @@ test("web search: extracts url_citation annotations", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     webSearch: true,
   });
@@ -607,7 +607,7 @@ test("background: high effort auto-enables background + store and polls", async 
   ]);
   const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
   const result = await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     reasoning: { effort: "high" },
   });
@@ -624,7 +624,7 @@ test("background: low effort stays in the foreground (no background/store)", asy
   const { fetch, calls } = mockFetchSeq([() => jsonResponse(RESPONSE_FIXTURE)]);
   const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     reasoning: { effort: "low" },
   });
@@ -637,7 +637,7 @@ test("background: explicit false overrides high-effort auto", async () => {
   const { fetch, calls } = mockFetchSeq([() => jsonResponse(RESPONSE_FIXTURE)]);
   const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     reasoning: { effort: "max" },
     background: false,
@@ -651,7 +651,7 @@ test("background: explicit true enables without reasoning", async () => {
   const { fetch, calls } = mockFetchSeq([() => jsonResponse(RESPONSE_FIXTURE)]);
   const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     background: true,
   });
@@ -684,7 +684,7 @@ test("background: stream resumes a dropped SSE via starting_after", async () => 
   const provider = new OpenAIProvider({ apiKey: "sk-test", fetch });
   const result = await collectStream(
     provider.stream({
-      model: "gpt-5.6-sol",
+      model: "gpt-5.5",
       messages: [textMessage("user", "q")],
       background: true,
     }),
@@ -708,14 +708,14 @@ test("cache: forwards cache.key as prompt_cache_key (and omits when unset)", asy
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     cache: { key: "conv-123" },
   });
   assert.equal(captured[0]!.body.prompt_cache_key, "conv-123");
 
   await provider.generate({
-    model: "gpt-5.6-sol",
+    model: "gpt-5.5",
     messages: [textMessage("user", "q")],
     cache: true,
   });

@@ -39,10 +39,10 @@ import {
 
 /** Known OpenAI model ids — literal-only, drives editor autocomplete. */
 export type OpenAIModelId =
-  | "gpt-5.6"
-  | "gpt-5.6-sol"
-  | "gpt-5.6-terra"
-  | "gpt-5.6-luna"
+  | "gpt-5.5"
+  | "gpt-5.5-pro"
+  | "gpt-5.4"
+  | "gpt-5.4-mini"
   | "gpt-5.4-nano"
   | "gpt-5.3-codex"
   | "o3"
@@ -430,7 +430,7 @@ export class OpenAIProvider implements Provider {
   /**
    * Reasoning models reject sampling parameters (`temperature`, `top_p`); the
    * adapter drops them instead of failing the request. The `*chat*` variants
-   * (e.g. `gpt-5.6-terra-chat-latest`) are non-reasoning and keep them.
+   * (e.g. `gpt-5.5-chat-latest`) are non-reasoning and keep them.
    */
   protected supportsSamplingParams(model: string): boolean {
     if (/^(o[0-9]|codex)/.test(model)) return false;
