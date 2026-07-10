@@ -13,13 +13,12 @@ import { OpenAIProvider, type OpenAIResponseBody } from "./openai.js";
 
 /** Known xAI model ids — literal-only, drives editor autocomplete. */
 export type XAIModelId =
-  | "grok-4.3"
+  | "grok-4.5"
   | "grok-4.20-0309-reasoning"
   | "grok-4.20-0309-non-reasoning"
   | "grok-4.20-multi-agent-0309"
   | "grok-4-fast-reasoning"
   | "grok-4-fast-non-reasoning"
-  | "grok-4-0709"
   | "grok-code-fast-1";
 
 export type XAIModel = XAIModelId | (string & {});

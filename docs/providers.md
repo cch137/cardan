@@ -41,7 +41,7 @@ prompt caching(唯一需 client 標記的 provider):
 - 走 Responses API(Chat Completions 已 legacy),與 OpenAI Responses 線上相容(`store: false` + `include`、`text.format`、function calling、相同 SSE):`XAIProvider` 繼承 `OpenAIProvider`,差異收斂在 protected hooks(baseUrl、`XAI_API_KEY`、採樣參數、reasoning 映射)。
 - reasoning effort 只接受 `none`/`low`/`medium`/`high`(`xhigh`/`max` 封頂 `high`;僅 grok-4.3+,舊模型省略 `reasoning`);不送 `summary`——xAI 對 reasoning 模型一律回 detailed summary。grok 模型(含 reasoning)保留 `temperature`/`top_p`。
 - 無 embeddings:`embed` 報 `invalid_request`。
-- prompt caching 全自動;Responses API 同樣吃 `prompt_cache_key`,故 `cache.key` 經繼承的 OpenAI `buildRequestBody` 直接生效(免額外 header)。讀取折扣逐模型不同(grok-4.3 約 0.16×),`input_tokens_details.cached_tokens`→`cache_read`。
+- prompt caching 全自動;Responses API 同樣吃 `prompt_cache_key`,故 `cache.key` 經繼承的 OpenAI `buildRequestBody` 直接生效(免額外 header)。讀取折扣逐模型不同(grok-4.5 約 0.25×),`input_tokens_details.cached_tokens`→`cache_read`。
 
 ## Groq
 

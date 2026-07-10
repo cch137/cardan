@@ -38,7 +38,7 @@ const RESPONSE_FIXTURE = {
   id: "resp_1",
   object: "response",
   status: "completed",
-  model: "grok-4.3",
+  model: "grok-4.5",
   output: [
     {
       type: "message",
@@ -63,7 +63,7 @@ test("targets api.x.ai with stateless Responses defaults", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   const result = await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
   });
   const request = captured[0]!;
@@ -97,7 +97,7 @@ test("folds reasoning_tokens into output.total (xAI additive accounting)", async
     ]),
   });
   const result = await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
   });
   assert.equal(result.usage.input.total, 32);
@@ -116,7 +116,7 @@ test("streaming finish folds reasoning_tokens into output.total", async () => {
     fetch: mockFetch([() => new Response(sse, { status: 200 })]),
   });
   const result = await collectStream(
-    provider.stream({ model: "grok-4.3", messages: [textMessage("user", "q")] }),
+    provider.stream({ model: "grok-4.5", messages: [textMessage("user", "q")] }),
   );
   assert.equal(result.usage.output.total, 119); // 9 + 110
   assert.deepEqual(result.usage.output.details, { reasoning: 110 });
@@ -129,7 +129,7 @@ test("keeps sampling params on reasoning models", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
     temperature: 0.5,
     topP: 0.9,
@@ -146,7 +146,7 @@ test("maps reasoning effort to the xAI range, without summary", async () => {
   });
   const generate = (reasoning: { enabled?: boolean; effort?: "max" | "medium" }) =>
     provider.generate({
-      model: "grok-4.3",
+      model: "grok-4.5",
       messages: [textMessage("user", "q")],
       reasoning,
     });
@@ -172,7 +172,7 @@ test("streams via the shared Responses parser", async () => {
     fetch: mockFetch([() => new Response(sse, { status: 200 })]),
   });
   const result = await collectStream(
-    provider.stream({ model: "grok-4.3", messages: [textMessage("user", "q")] }),
+    provider.stream({ model: "grok-4.5", messages: [textMessage("user", "q")] }),
   );
   assert.deepEqual(result.message.content, [
     { type: "thinking", text: "hm", signature: "enc_1", id: "rs_1" },
@@ -185,7 +185,7 @@ test("streams via the shared Responses parser", async () => {
 test("embed reports invalid_request (xAI has no embeddings API)", async () => {
   const provider = new XAIProvider({ apiKey: "xai-test" });
   await assert.rejects(
-    provider.embed({ model: "grok-4.3", input: ["a"] }),
+    provider.embed({ model: "grok-4.5", input: ["a"] }),
     (error: unknown) =>
       error instanceof CardanError &&
       error.code === "invalid_request" &&
@@ -202,11 +202,11 @@ test("Cardan routes xai/ model ids to the xAI provider", async () => {
     },
   });
   await cardan.generate({
-    model: "xai/grok-4.3",
+    model: "xai/grok-4.5",
     messages: [textMessage("user", "q")],
   });
   assert.equal(captured[0]!.url, "https://api.x.ai/v1/responses");
-  assert.equal(captured[0]!.body.model, "grok-4.3");
+  assert.equal(captured[0]!.body.model, "grok-4.5");
 });
 
 test("web search: uses xAI filters shape, allowed capped at five", async () => {
@@ -216,7 +216,7 @@ test("web search: uses xAI filters shape, allowed capped at five", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
     webSearch: {
       allowedDomains: ["a.com", "b.com", "c.com", "d.com", "e.com", "f.com"],
@@ -238,7 +238,7 @@ test("web search: blocked domains map to excluded_domains", async () => {
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
   await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
     webSearch: { blockedDomains: ["spam.com"] },
   });
@@ -289,7 +289,7 @@ test("web search: reads both annotations and top-level citations", async () => {
     ]),
   });
   const result = await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
     webSearch: true,
   });
@@ -324,7 +324,7 @@ test("background: high effort auto-enables background + store and polls", async 
 
   const provider = new XAIProvider({ apiKey: "xai-test", fetch });
   await provider.generate({
-    model: "grok-4.3",
+    model: "grok-4.5",
     messages: [textMessage("user", "q")],
     reasoning: { effort: "high" },
   });
