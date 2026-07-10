@@ -28,6 +28,7 @@ import {
   type Provider,
   type RateLimitStatus,
   type RateLimitWindow,
+  type ReasoningEffort,
   type RetryOptions,
   type StreamEvent,
   type Usage,
@@ -372,6 +373,25 @@ function withBeta(existing: string | undefined, flag: string): string {
  * error to the caller.
  */
 const NO_SAMPLING_PARAMS = /^claude-(?:fable|mythos|sonnet|opus)-\d+(?:-\d+)?$/;
+
+/**
+ * Models that accept `thinking: { type: "adaptive" }` (and `output_config.effort`).
+ * Older models (haiku-4-5 and earlier 3.x/4.x lines) reject adaptive thinking
+ * (`adaptive thinking is not supported on this model`) and the effort parameter
+ * (`This model does not support the effort parameter`); they take budget-based
+ * thinking instead. Verified against claude-haiku-4-5 (budget-only) vs
+ * claude-sonnet-5 (adaptive). Newer families default to adaptive.
+ */
+const ADAPTIVE_THINKING_MODELS = /^claude-(?:fable|sonnet-5|opus-4-[89])/;
+
+/** effort → `budget_tokens` for the budget-based (non-adaptive) thinking path. */
+const THINKING_BUDGETS: Record<ReasoningEffort, number> = {
+  low: 2048,
+  medium: 8192,
+  high: 16384,
+  xhigh: 24576,
+  max: 32768,
+};
 
 /** GA server-side web-search tool. Same result/citation wire shape as later versions. */
 const WEB_SEARCH_TOOL_VERSION = "web_search_20250305";
@@ -776,8 +796,19 @@ export class AnthropicProvider implements Provider {
     }
     // reasoning is on unless explicitly disabled; `effort` implies enabled
     if (options.reasoning && options.reasoning.enabled !== false) {
-      body.thinking = { type: "adaptive" };
-      if (options.reasoning.effort) outputConfig.effort = options.reasoning.effort;
+      if (ADAPTIVE_THINKING_MODELS.test(options.model)) {
+        body.thinking = { type: "adaptive" };
+        if (options.reasoning.effort) outputConfig.effort = options.reasoning.effort;
+      } else {
+        // Older models reject adaptive thinking and the effort parameter; map
+        // effort to a token budget and clamp within the response's max_tokens.
+        const maxTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+        const budget = Math.min(
+          Math.max(THINKING_BUDGETS[options.reasoning.effort ?? "medium"], 1024),
+          maxTokens - 1,
+        );
+        body.thinking = { type: "enabled", budget_tokens: budget };
+      }
     }
     if (Object.keys(outputConfig).length > 0) body.output_config = outputConfig;
 

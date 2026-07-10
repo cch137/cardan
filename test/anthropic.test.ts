@@ -162,6 +162,64 @@ test("reasoning: effort alone enables thinking; enabled:false disables", async (
   assert.equal(captured[1]!.body.output_config, undefined);
 });
 
+test("reasoning: non-adaptive models (haiku-4-5) get budget-based thinking, no effort", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  // haiku-4-5 rejects `thinking: { type: "adaptive" }` and `output_config.effort`;
+  // effort maps to a token budget and no effort hint is sent.
+  await provider.generate({
+    model: "claude-haiku-4-5",
+    messages: [textMessage("user", "q")],
+    reasoning: { effort: "low" },
+  });
+  assert.deepEqual(captured[0]!.body.thinking, {
+    type: "enabled",
+    budget_tokens: 2048,
+  });
+  assert.equal(captured[0]!.body.output_config, undefined);
+
+  // effort defaults to medium when unspecified but still enabled
+  await provider.generate({
+    model: "claude-haiku-4-5",
+    messages: [textMessage("user", "q")],
+    reasoning: { enabled: true },
+  });
+  assert.deepEqual(captured[1]!.body.thinking, {
+    type: "enabled",
+    budget_tokens: 8192,
+  });
+
+  // enabled:false still sends no thinking on the budget path
+  await provider.generate({
+    model: "claude-haiku-4-5",
+    messages: [textMessage("user", "q")],
+    reasoning: { enabled: false, effort: "high" },
+  });
+  assert.equal(captured[2]!.body.thinking, undefined);
+});
+
+test("reasoning: budget clamps under a small maxOutputTokens", async () => {
+  const captured: Captured[] = [];
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  // high effort's 16384 budget must clamp to maxTokens - 1.
+  await provider.generate({
+    model: "claude-haiku-4-5",
+    messages: [textMessage("user", "q")],
+    maxOutputTokens: 4096,
+    reasoning: { effort: "high" },
+  });
+  assert.deepEqual(captured[0]!.body.thinking, {
+    type: "enabled",
+    budget_tokens: 4095,
+  });
+});
+
 test("parses response: parts, finish reason, usage totals", async () => {
   const provider = new AnthropicProvider({
     apiKey: "sk-test",

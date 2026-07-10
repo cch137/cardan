@@ -154,7 +154,8 @@ test("maps reasoning effort to the xAI range, without summary", async () => {
   await generate({ enabled: false });
   await generate({ enabled: true });
   assert.deepEqual(captured[0]!.body.reasoning, { effort: "high" });
-  assert.deepEqual(captured[1]!.body.reasoning, { effort: "none" });
+  // xAI rejects `effort: none`, so reasoning cannot be disabled: field omitted.
+  assert.equal(captured[1]!.body.reasoning, undefined);
   // no effort requested → provider default; field omitted entirely
   assert.equal(captured[2]!.body.reasoning, undefined);
 });
@@ -300,38 +301,22 @@ test("web search: reads both annotations and top-level citations", async () => {
   ]);
 });
 
-test("background: high effort auto-enables background + store and polls", async () => {
-  const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
-  let i = 0;
-  const handlers = [
-    () => jsonResponse({ id: "resp_bg", status: "queued" }),
-    () => jsonResponse({ ...RESPONSE_FIXTURE, id: "resp_bg" }),
-  ];
-  const fetch = (async (input: unknown, init?: RequestInit) => {
-    let body: Record<string, unknown> | undefined;
-    if (init?.body) {
-      try {
-        body = JSON.parse(String(init.body)) as Record<string, unknown>;
-      } catch {
-        body = undefined;
-      }
-    }
-    calls.push({ url: String(input), method: init?.method ?? "GET", body });
-    const handler = handlers[Math.min(i, handlers.length - 1)]!;
-    i++;
-    return handler();
-  }) as unknown as typeof globalThis.fetch;
-
-  const provider = new XAIProvider({ apiKey: "xai-test", fetch });
+test("background: never sent (xAI rejects it), even at high effort", async () => {
+  const captured: Captured[] = [];
+  const provider = new XAIProvider({
+    apiKey: "xai-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  // OpenAI auto-enables background for high/xhigh/max effort; xAI must not —
+  // its Responses API 400s on `background`. A single POST completes inline.
   await provider.generate({
     model: "grok-4.5",
     messages: [textMessage("user", "q")],
     reasoning: { effort: "high" },
   });
-  assert.equal(calls[0]!.method, "POST");
-  assert.equal(calls[0]!.url, "https://api.x.ai/v1/responses");
-  assert.equal(calls[0]!.body!.background, true);
-  assert.equal(calls[0]!.body!.store, true);
-  assert.equal(calls[1]!.method, "GET");
-  assert.equal(calls[1]!.url, "https://api.x.ai/v1/responses/resp_bg");
+  assert.equal(captured.length, 1);
+  assert.equal(captured[0]!.url, "https://api.x.ai/v1/responses");
+  assert.equal(captured[0]!.body.background, undefined);
+  assert.equal(captured[0]!.body.store, false);
+  assert.deepEqual(captured[0]!.body.reasoning, { effort: "high" });
 });

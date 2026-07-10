@@ -62,16 +62,16 @@ const MAX_SEARCH_DOMAINS = 5;
  * `messages` (override via `providerOptions`).
  *
  * Capability notes:
- * - `reasoning.effort` accepts `none`/`low`/`medium`/`high` and is only
- *   supported by grok-4.3+; omit `reasoning` for older models. `xhigh`/`max`
- *   cap to `high`. No `summary` parameter is sent — xAI always returns
- *   detailed reasoning summaries for reasoning models.
+ * - `reasoning.effort` accepts `low`/`medium`/`high` (verified against
+ *   grok-4.5); `none` is rejected (`reasoning_effort value none`), so reasoning
+ *   cannot be disabled — the `reasoning` field is simply omitted instead.
+ *   `xhigh`/`max` cap to `high`. No `summary` parameter is sent — xAI always
+ *   returns detailed reasoning summaries for reasoning models.
  * - grok models accept `temperature`/`top_p` even when reasoning.
  * - xAI offers no embeddings API; `embed` throws `invalid_request`.
- * - background mode is inherited: xAI's Responses API takes the same
- *   `background`/`store` parameters and `GET /v1/responses/{id}` retrieval, so
- *   high-effort requests auto-run in background (poll on `generate`, resume on
- *   `stream`) exactly like OpenAI.
+ * - `background` is never sent: xAI's Responses API rejects it (`Argument not
+ *   supported: background`). The mechanism is OpenAI-only, so the auto-background
+ *   behavior inherited from the OpenAI adapter is disabled here.
  */
 export class XAIProvider extends OpenAIProvider {
   override readonly name: string = "xai";
@@ -89,10 +89,17 @@ export class XAIProvider extends OpenAIProvider {
     return true;
   }
 
+  /** xAI's Responses API rejects `background`; the mechanism is OpenAI-only. */
+  protected override resolveBackground(): boolean {
+    return false;
+  }
+
   protected override convertReasoning(
     reasoning: NonNullable<GenerateOptions["reasoning"]>,
   ): Record<string, unknown> | undefined {
-    if (reasoning.enabled === false) return { effort: "none" };
+    // xAI reasoning models cannot disable reasoning (`effort: none` is
+    // rejected), so omit the field entirely rather than try to turn it off.
+    if (reasoning.enabled === false) return undefined;
     if (!reasoning.effort) return undefined;
     return { effort: EFFORT_MAP[reasoning.effort] };
   }
