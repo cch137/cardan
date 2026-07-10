@@ -105,3 +105,37 @@ test("throws on duplicate tool_result for the same call", () => {
       error instanceof CardanError && error.code === "invalid_request",
   );
 });
+
+test("drops blank unsigned text parts (image-only messages)", () => {
+  const result = normalizeMessages([
+    {
+      role: "user",
+      content: [
+        { type: "image", mimeType: "image/png", data: new URL("https://x.test/a.png") },
+        { type: "text", text: "" },
+      ],
+    },
+  ]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]!.content.length, 1);
+  assert.equal(result[0]!.content[0]!.type, "image");
+});
+
+test("drops a message left with no parts after blank-text filtering", () => {
+  const result = normalizeMessages([
+    textMessage("user", "hi"),
+    textMessage("assistant", "yo"),
+    { role: "user", content: [{ type: "text", text: "  \n" }] },
+  ]);
+  assert.equal(result.length, 2);
+});
+
+test("keeps blank text parts that carry a signature", () => {
+  const result = normalizeMessages([
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "", signature: "sig" }],
+    },
+  ]);
+  assert.deepEqual(result[0]!.content, [{ type: "text", text: "", signature: "sig" }]);
+});

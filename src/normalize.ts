@@ -10,9 +10,20 @@ import type { ContentPart, Message, ToolCallPart, ToolResultPart } from "./types
  *   result, so resumed/aborted conversations stay replayable;
  * - a tool_result without a matching tool_call throws (`invalid_request`),
  *   as does a duplicate result for the same call id;
+ * - blank unsigned text parts are dropped (some providers, e.g. Anthropic,
+ *   reject empty text blocks; a blank part carries no meaning for any of
+ *   them). Signed text parts are kept — a signature must be replayed
+ *   verbatim. A message left with no parts is dropped entirely;
  * - consecutive messages with the same role are merged.
  */
-export function normalizeMessages(messages: Message[]): Message[] {
+export function normalizeMessages(input: Message[]): Message[] {
+  const messages: Message[] = input.map((message) => ({
+    ...message,
+    content: message.content.filter(
+      (part) => !(part.type === "text" && !part.signature && !part.text.trim()),
+    ),
+  }));
+
   const results = new Map<string, ToolResultPart>();
   for (const message of messages) {
     for (const part of message.content) {
