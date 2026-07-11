@@ -44,6 +44,19 @@ prompt caching(唯一需 client 標記的 provider):
 - 無 embeddings:`embed` 報 `invalid_request`。
 - prompt caching 全自動;Responses API 同樣吃 `prompt_cache_key`,故 `cache.key` 經繼承的 OpenAI `buildRequestBody` 直接生效(免額外 header)。讀取折扣逐模型不同(grok-4.5 約 0.25×),`input_tokens_details.cached_tokens`→`cache_read`。
 
+### Grok Build 訂閱(OAuth / `XAIOAuthProvider`)
+
+用 **SuperGrok 訂閱額度**(而非按量計費 API)跑推論,對應 Anthropic 的訂閱 OAuth 路徑。`grok login` 會把 token 寫進 `~/.grok/auth.json`(逆向自 x.ai CLI,詳見 `assets/gb-dist/extracted/auth-notes.md`)。**已對 live proxy 端到端驗證。**
+
+- **端點與格式**:訂閱走 `cli-chat-proxy.grok.com/v1/**chat/completions**`(OpenAI **Chat Completions** 舊格式),與 `XAIProvider` 走的 `api.x.ai` **Responses** 不同格式。故 `XAIOAuthProvider` **繼承 `GroqProvider`(Chat Completions 機制)** 而非 `XAIProvider`;只用 fetch wrapper 換掉 auth/baseUrl/headers,零改動既有 provider。傳標準 xAI model id(如 `grok-4.5`,伺服端解析成 `grok-4.5-build`);proxy 亦收 CLI 自用的 `grok-build`。
+- **必要 header(5 個)**:`Authorization: Bearer <token>`、`X-XAI-Token-Auth: xai-grok-cli`(要 proxy 把 bearer 當 CLI session 驗證)、`x-grok-model-override: <model>`(proxy 靠此 header 選模型,非 body `model`)、`x-grok-client-version`(缺/過舊回 **426**)、`Content-Type`。實測 4 header 會 426,靠 binary 補上第 5 個才 200。
+- **版本門檻**:proxy 有最低版本 floor,落後 stable 約 2 個月且移動慢(floor `0.1.202` 於 2026-05-07 發布;預設送的 `0.2.93` 於 2026-07-08)。預設值有 2 個月以上餘裕,配合每月更新一次即可;真 426 時錯誤訊息會提示調 `clientVersion`。
+- **auth 解析**:`~/.grok/auth.json` 結構 `{ "<scope>": { "key": <accessToken>, "refresh_token", "exp"(epoch **秒**) } }`;`GROK_AUTH_SCOPE` 常數即該 scope key。cardan **維持 fetch-only 不讀檔**——token 由呼叫端傳入 `credentials`。
+- **refresh**:標準 OAuth2 `refresh_token` grant(**form-encoded**,`client_id=grok-cli`,`accounts.x.ai` token endpoint),到期前(`expiresAt`)主動換、401 再換一次;共用單一 round-trip;`onRefresh` 回寫。bare token(無 refresh_token)視為 inference-only,到期於 401 清楚報錯。
+- **錯誤傳遞**:proxy 錯誤回 `{"error":"字串"}`,但 Chat Completions 錯誤路徑只讀 `error.message`(物件)。fetch wrapper 的 `normalizeErrorBody` 把字串型 `error` 正規化成 `{error:{message}}`(非 JSON body 原文透出),確保底層訊息(如 426)到應用層。
+- **env / precedence**:env `GROK_BUILD_OAUTH_TOKEN`(對應 `CLAUDE_CODE_OAUTH_TOKEN`);工廠 `resolveXAI()` 優先序 config `xaiOAuth` > config `xai.apiKey` > env `GROK_BUILD_OAUTH_TOKEN` > env `XAI_API_KEY`,雙 env 皆設時 OAuth 勝出並 `warnOnce`。
+- **ToS**:`X-XAI-Token-Auth: xai-grok-cli` 是明確宣稱「我是官方 CLI」,在 CLI 外用訂閱額度很可能違反 xAI 條款;真 CLI 另送 telemetry/session signal,裸 replay 屬異常流量。風險自負。
+
 ## Groq
 
 - 走 **Chat Completions**(`/openai/v1/chat/completions`,穩定主力),不走 Responses API(後者 beta 且不支援 `store`/`include`,無法繼承 `OpenAIProvider`)。`GroqProvider` 獨立實作(與 Modal 同為 Chat Completions 但 wire 細節不同,不互相繼承)。

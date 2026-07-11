@@ -1,0 +1,303 @@
+import { CardanError, wrapFetchError } from "../errors.js";
+import type { Provider, RetryOptions } from "../types.js";
+import { GroqProvider } from "./groq.js";
+
+/**
+ * Grok CLI subscription (SuperGrok) inference for cardan.
+ *
+ * The Grok CLI does not bill against the pay-per-token xAI API. `grok login`
+ * mints an OAuth session token and inference goes through a proxy that speaks
+ * the **OpenAI Chat Completions** wire format:
+ *
+ *   POST https://cli-chat-proxy.grok.com/v1/chat/completions
+ *   Authorization: Bearer <access_token from ~/.grok/auth.json>
+ *   X-XAI-Token-Auth: xai-grok-cli        # validate bearer as a CLI session
+ *   x-grok-model-override: <model>        # proxy routes on this, not body.model
+ *   Content-Type: application/json
+ *
+ * This is the Grok analogue of the Claude.ai-subscription OAuth path in
+ * `anthropic.ts`. Because the proxy uses Chat Completions (not xAI's Responses
+ * API that `xai.ts` targets), this reuses the {@link GroqProvider} Chat
+ * Completions machinery and only swaps auth, base URL, and the two CLI headers.
+ *
+ * cardan stays fetch-only: this takes credentials, it does NOT read
+ * `~/.grok/auth.json` itself. Load the token yourself (bin/grok-token.sh, or
+ * `JSON.parse(fs.readFileSync("~/.grok/auth.json"))[GROK_AUTH_SCOPE]`) and pass
+ * `{ accessToken, refreshToken, expiresAt }`.
+ *
+ * Using subscription quota outside the official CLI likely violates xAI's
+ * terms, and the `X-XAI-Token-Auth` header is an explicit "I am the CLI" claim.
+ * Use accordingly.
+ */
+
+/** Default proxy base; the Groq machinery appends `/v1/chat/completions`. */
+const DEFAULT_PROXY_BASE = "https://cli-chat-proxy.grok.com";
+/** OAuth token endpoint for the refresh grant (`accounts.x.ai`). */
+const DEFAULT_TOKEN_URL = "https://accounts.x.ai/oauth2/token";
+/** The Grok CLI's public OAuth client id. */
+const DEFAULT_CLIENT_ID = "grok-cli";
+/** Header that tells the proxy to validate the bearer as a CLI session token. */
+const TOKEN_AUTH_HEADER = "x-xai-token-auth";
+const TOKEN_AUTH_VALUE = "xai-grok-cli";
+/** Header the proxy routes on (in place of the JSON body `model`). */
+const MODEL_OVERRIDE_HEADER = "x-grok-model-override";
+/**
+ * The proxy rejects stale/absent clients with HTTP 426 ("Grok CLI version
+ * (none) is outdated") below a minimum-version floor. The floor lags the
+ * current release by ~2 months and moves slowly (floor 0.1.202 shipped
+ * 2026-05-07; this default 0.2.93 shipped 2026-07-08), so a monthly bump keeps
+ * a comfortable margin. If a 426 ever surfaces, pass a newer `clientVersion`.
+ */
+const CLIENT_VERSION_HEADER = "x-grok-client-version";
+const DEFAULT_CLIENT_VERSION = "0.2.93";
+/** The client surface the real CLI advertises; harmless constant. */
+const CLIENT_SURFACE_HEADER = "x-grok-client-surface";
+const DEFAULT_CLIENT_SURFACE = "grok-shell";
+/** Refresh this many ms before `expiresAt` to avoid clock-skew 401s. */
+const EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+
+/**
+ * The `~/.grok/auth.json` scope key under which `grok login` stores the OIDC
+ * session token: `{ "<scope>": { "key": <accessToken>, "refresh_token": ... } }`.
+ * The `::` suffix is the audience UUID; override if yours differs.
+ */
+export const GROK_AUTH_SCOPE =
+  "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
+
+/** A Grok CLI OAuth credential set, as stored in `~/.grok/auth.json`. */
+export interface XAIOAuthCredentials {
+  /** Bearer sent to the proxy — the `key` field in `~/.grok/auth.json`. */
+  accessToken: string;
+  /** Mints new access tokens; rotates on refresh. Absent = refresh disabled. */
+  refreshToken?: string | null;
+  /** Epoch ms. Absent means unknown — no proactive refresh, refresh on 401 only. */
+  expiresAt?: number | null;
+}
+
+export interface XAIOAuthProviderOptions {
+  /** The `grok login` credential set (from `~/.grok/auth.json`). */
+  credentials: XAIOAuthCredentials;
+  /**
+   * Called after each successful refresh with the rotated credentials. Persist
+   * them back to `~/.grok/auth.json` — the old refresh token stops working once
+   * a new one is issued.
+   */
+  onRefresh?: (credentials: Required<XAIOAuthCredentials>) => void | Promise<void>;
+  /** Override the OAuth token endpoint (default `accounts.x.ai/oauth2/token`). */
+  tokenUrl?: string;
+  /** Override the OAuth client id (default `grok-cli`). */
+  clientId?: string;
+  /** Override the proxy base URL (default `cli-chat-proxy.grok.com`). */
+  baseUrl?: string;
+  /**
+   * CLI version sent as `x-grok-client-version` (default `0.2.93`). The proxy
+   * 426s clients below its floor (>= 0.1.202 when verified); raise this if the
+   * proxy starts rejecting the default.
+   */
+  clientVersion?: string;
+  /** Client surface sent as `x-grok-client-surface` (default `grok-shell`). */
+  clientSurface?: string;
+  /** Extra headers on every request. */
+  headers?: Record<string, string>;
+  /** Custom fetch implementation (testing, proxies). */
+  fetch?: typeof globalThis.fetch;
+  /** Default retry behavior for all requests; `false` disables. */
+  retry?: Partial<RetryOptions> | false;
+  /** Default per-attempt timeout (ms) for all requests; `0`/undefined disables. */
+  timeoutMs?: number;
+}
+
+/** Manages the Grok OAuth credential: proactive + on-401 refresh, shared round-trips. */
+class GrokOAuth {
+  private creds: XAIOAuthCredentials;
+  private inFlight: Promise<void> | null = null;
+
+  constructor(
+    private readonly opts: XAIOAuthProviderOptions,
+    private readonly fetchImpl: typeof globalThis.fetch,
+  ) {
+    if (!opts.credentials?.accessToken) {
+      throw new CardanError("auth", "xai oauth: credentials.accessToken is required", {
+        provider: "xai-oauth",
+      });
+    }
+    this.creds = { ...opts.credentials };
+  }
+
+  get canRefresh(): boolean {
+    return Boolean(this.creds.refreshToken);
+  }
+
+  private get expired(): boolean {
+    const e = this.creds.expiresAt;
+    return e != null && Date.now() + EXPIRY_BUFFER_MS >= e;
+  }
+
+  /** Valid access token, refreshing first if near expiry and refreshable. */
+  async accessToken(): Promise<string> {
+    if (this.expired && this.canRefresh) await this.refresh();
+    return this.creds.accessToken;
+  }
+
+  /** Force a refresh now; concurrent callers share one round-trip. */
+  refresh(): Promise<void> {
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.doRefresh().finally(() => {
+      this.inFlight = null;
+    });
+    return this.inFlight;
+  }
+
+  private async doRefresh(): Promise<void> {
+    const refreshToken = this.creds.refreshToken;
+    if (!refreshToken) {
+      throw new CardanError("auth", "xai oauth: no refresh token; re-run `grok login`", {
+        provider: "xai-oauth",
+      });
+    }
+    let res: Response;
+    try {
+      // Standard OAuth2 token endpoint: form-encoded, unlike Anthropic's JSON.
+      res = await this.fetchImpl(this.opts.tokenUrl ?? DEFAULT_TOKEN_URL, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: refreshToken,
+          client_id: this.opts.clientId ?? DEFAULT_CLIENT_ID,
+        }).toString(),
+      });
+    } catch (error) {
+      throw wrapFetchError(error, "xai-oauth");
+    }
+    if (!res.ok) {
+      throw new CardanError(
+        "auth",
+        `xai oauth: token refresh failed (HTTP ${res.status}); re-run \`grok login\``,
+        { provider: "xai-oauth", status: res.status },
+      );
+    }
+    const data = (await res.json()) as {
+      access_token?: string;
+      key?: string;
+      refresh_token?: string;
+      expires_in?: number;
+    };
+    const accessToken = data.access_token ?? data.key;
+    if (!accessToken) {
+      throw new CardanError("auth", "xai oauth: refresh response had no access token", {
+        provider: "xai-oauth",
+      });
+    }
+    const next: Required<XAIOAuthCredentials> = {
+      accessToken,
+      refreshToken: data.refresh_token ?? refreshToken,
+      expiresAt:
+        typeof data.expires_in === "number" ? Date.now() + data.expires_in * 1000 : null,
+    };
+    this.creds = next;
+    await this.opts.onRefresh?.(next);
+  }
+
+  /** A fetch that injects auth + CLI headers and refreshes once on a 401. */
+  wrapFetch(base: typeof globalThis.fetch): typeof globalThis.fetch {
+    const self = this;
+    return async function authedFetch(input, init) {
+      const send = async (): Promise<Response> => {
+        const headers = new Headers(init?.headers);
+        headers.set("authorization", `Bearer ${await self.accessToken()}`);
+        headers.set(TOKEN_AUTH_HEADER, TOKEN_AUTH_VALUE);
+        headers.set(CLIENT_VERSION_HEADER, self.opts.clientVersion ?? DEFAULT_CLIENT_VERSION);
+        headers.set(CLIENT_SURFACE_HEADER, self.opts.clientSurface ?? DEFAULT_CLIENT_SURFACE);
+        const model = modelFromBody(init?.body);
+        if (model) headers.set(MODEL_OVERRIDE_HEADER, model);
+        return base(input, { ...init, headers });
+      };
+      let res = await send();
+      // Access token rejected: refresh once and replay (proactive refresh only
+      // fires when `expiresAt` is known, so tokens with unknown expiry land here).
+      if (res.status === 401 && self.canRefresh) {
+        await self.refresh();
+        res = await send();
+      }
+      // Surface proxy errors to the app layer: the proxy returns `{"error":
+      // "<message>"}` (string), but the Chat Completions error path only reads
+      // `error.message` (object), so without this the real message — e.g. the
+      // 426 "Grok CLI version is outdated" — is dropped for a generic HTTP code.
+      return res.ok ? res : normalizeErrorBody(res);
+    };
+  }
+}
+
+/** Rebuild a non-OK response so a string `error` becomes `{ error: { message } }`. */
+async function normalizeErrorBody(res: Response): Promise<Response> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    return res;
+  }
+  let message: string | undefined;
+  try {
+    const parsed = JSON.parse(text) as { error?: unknown };
+    if (typeof parsed.error === "string") message = parsed.error;
+  } catch {
+    // non-JSON body: expose it verbatim as the message
+    if (text) message = text;
+  }
+  if (message === undefined) {
+    // Already object-shaped (or empty); re-emit unchanged (body was consumed).
+    return new Response(text, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
+  }
+  if (res.status === 426) {
+    message += " — set `clientVersion` to a current Grok CLI version";
+  }
+  return new Response(JSON.stringify({ error: { message } }), {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+}
+
+/** Pull `model` out of a serialized Chat Completions request body, if present. */
+function modelFromBody(body: unknown): string | undefined {
+  if (typeof body !== "string") return undefined;
+  try {
+    const model = (JSON.parse(body) as { model?: unknown }).model;
+    return typeof model === "string" ? model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Grok CLI subscription provider. Speaks Chat Completions against the CLI chat
+ * proxy with the `grok login` OAuth token. Pass standard xAI model ids
+ * (e.g. `grok-4.5`); the proxy also accepts the CLI's own `grok-build`.
+ */
+export class XAIOAuthProvider extends GroqProvider {
+  override readonly name: string = "xai-oauth";
+
+  constructor(options: XAIOAuthProviderOptions) {
+    const auth = new GrokOAuth(options, options.fetch ?? globalThis.fetch);
+    super({
+      baseUrl: options.baseUrl ?? DEFAULT_PROXY_BASE,
+      // Placeholder: the wrapped fetch always overrides the Authorization
+      // header, so GroqProvider's own api-key check never sends this value.
+      apiKey: "oauth",
+      headers: options.headers,
+      fetch: auth.wrapFetch(options.fetch ?? globalThis.fetch),
+      retry: options.retry,
+      timeoutMs: options.timeoutMs,
+    });
+  }
+}
+
+/** Convenience factory mirroring the other cardan provider constructors. */
+export function createXAIOAuthProvider(options: XAIOAuthProviderOptions): Provider {
+  return new XAIOAuthProvider(options);
+}

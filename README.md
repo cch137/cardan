@@ -17,11 +17,12 @@ Model ids are `prefix/model`. `createCardan()` reads these env vars per provider
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY`, or `CLAUDE_CODE_OAUTH_TOKEN` (subscription) |
 | OpenAI    | `openai`    | `OPENAI_API_KEY`                                               |
 | Google    | `google`    | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)                         |
-| xAI       | `xai`       | `XAI_API_KEY`                                                  |
+| xAI       | `xai`       | `XAI_API_KEY`, or `GROK_BUILD_OAUTH_TOKEN` (subscription — see [xAI Grok subscription](#xai-grok-subscription-grok-login)) |
 | Groq      | `groq`      | `GROQ_API_KEY`                                                 |
 | Modal     | `modal`     | `MODAL_BASE_URL` (required); `MODAL_API_KEY`, or `MODAL_KEY` + `MODAL_SECRET` |
 
 - **Anthropic auth precedence** (most explicit first): config `oauth` → config `apiKey` → env `CLAUDE_CODE_OAUTH_TOKEN` → env `ANTHROPIC_API_KEY`. `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) bills against a Claude.ai subscription; if both env vars are set, the OAuth token wins and cardan warns. For the full refreshable OAuth flow, pass `oauth` in config — see [Anthropic `oauth`](#behavior-notes).
+- **xAI auth precedence** (most explicit first): config `xaiOAuth` → config `xai.apiKey` → env `GROK_BUILD_OAUTH_TOKEN` (Grok Build subscription) → env `XAI_API_KEY`. If both env vars are set, the OAuth token wins and cardan warns. A bare env token is inference-only (no refresh); pass `xaiOAuth` for the refreshable flow.
 - **Google**: prefers `GEMINI_API_KEY`; if both it and `GOOGLE_API_KEY` are set, cardan warns (Google's own `@google/genai` prefers `GOOGLE_API_KEY`, so the two can disagree).
 
 ## Usage
@@ -78,6 +79,16 @@ await anthropic.generate({ model: "claude-opus-4-8", messages });
 ```
 
 `collectStream(stream)` accumulates a stream into a `GenerateResult` (message + finishReason + usage); `collectStreamToMessage(stream)` returns just the assistant `Message`, ready to push into the next request. See [Reasoning / thinking state](#reasoning--thinking-state).
+
+### xAI Grok subscription (`grok login`)
+
+Bill against a **SuperGrok subscription** instead of the pay-per-token API. Install the Grok CLI (`https://x.ai/cli/install.sh`), run `grok login`, then set the `eyJ0…` token from `~/.grok/auth.json` as `GROK_BUILD_OAUTH_TOKEN` — `createCardan()` auto-wraps it into credentials, so `xai/grok-4.5` just works:
+
+```bash
+export GROK_BUILD_OAUTH_TOKEN=$(jq -r '.[]|select(.key).key' ~/.grok/auth.json | head -1)
+```
+
+For the refreshable flow (`refresh_token`, `onRefresh`, `clientVersion`) pass `xaiOAuth` / `new XAIOAuthProvider(...)`. Design + wire details: [docs/providers.md](docs/providers.md).
 
 ### Conversation
 

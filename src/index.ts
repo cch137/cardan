@@ -28,6 +28,11 @@ import {
   type XAIModelId,
   type XAIProviderOptions,
 } from "./providers/xai.js";
+import {
+  XAIOAuthProvider,
+  type XAIOAuthProviderOptions,
+} from "./providers/xai-oauth.js";
+import { readEnv, warnOnce } from "./env.js";
 import type {
   EmbedOptions,
   EmbedResult,
@@ -137,6 +142,13 @@ export {
   type XAIProviderOptions,
 } from "./providers/xai.js";
 export {
+  XAIOAuthProvider,
+  createXAIOAuthProvider,
+  GROK_AUTH_SCOPE,
+  type XAIOAuthCredentials,
+  type XAIOAuthProviderOptions,
+} from "./providers/xai-oauth.js";
+export {
   PoolProvider,
   createPool,
   type PoolBehavior,
@@ -170,6 +182,8 @@ export interface CardanConfig {
   modal?: ModalProviderOptions;
   openai?: OpenAIProviderOptions;
   xai?: XAIProviderOptions;
+  /** Grok Build subscription (`grok login`) for the `xai` prefix; see auth precedence. */
+  xaiOAuth?: XAIOAuthProviderOptions;
   /** Additional or overriding providers, keyed by prefix. */
   providers?: Record<string, Provider>;
   /**
@@ -229,13 +243,36 @@ export class Cardan {
         provider = new OpenAIProvider(this.config.openai);
         break;
       case "xai":
-        provider = new XAIProvider(this.config.xai);
+        provider = this.resolveXAI();
         break;
       default:
         throw new CardanError("invalid_request", `unknown provider "${name}"`);
     }
     this.cache.set(name, provider);
     return provider;
+  }
+
+  /**
+   * Selects the `xai` auth path. Precedence (most explicit first): config
+   * `xaiOAuth` > config `xai.apiKey` > env `GROK_BUILD_OAUTH_TOKEN`
+   * (Grok Build subscription) > env `XAI_API_KEY`. A bare env token is
+   * inference-only (no refresh); pass `xaiOAuth` for the refreshable flow.
+   */
+  private resolveXAI(): Provider {
+    if (this.config.xaiOAuth) return new XAIOAuthProvider(this.config.xaiOAuth);
+    if (this.config.xai?.apiKey) return new XAIProvider(this.config.xai);
+    const token = readEnv("GROK_BUILD_OAUTH_TOKEN");
+    if (token) {
+      if (readEnv("XAI_API_KEY")) {
+        warnOnce(
+          "xai-dual-env",
+          "both GROK_BUILD_OAUTH_TOKEN and XAI_API_KEY are set; using the OAuth " +
+            "(subscription) token. Unset GROK_BUILD_OAUTH_TOKEN to use the API key.",
+        );
+      }
+      return new XAIOAuthProvider({ credentials: { accessToken: token } });
+    }
+    return new XAIProvider(this.config.xai);
   }
 
   async generate<S extends SchemaInput = SchemaInput>(
