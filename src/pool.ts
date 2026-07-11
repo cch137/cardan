@@ -147,9 +147,10 @@ function resolveWeight(weight: number | undefined, label: string): number {
  * members' weights; each request takes the next slot round-robin. On a
  * failover-class error it switches to the next *distinct* member and retries,
  * emitting a warning. Since the pool owns the cross-account retry, it disables
- * the underlying provider's own retry per attempt (unless there's only one
- * member to try, in which case the caller's retry is preserved). For `stream`,
- * a switch is only possible before the first event is yielded.
+ * the underlying provider's own retry per attempt when ≥2 members are tried, or
+ * on an all-cooling last-ditch attempt (avoids hanging on a long Retry-After).
+ * A single ready member still preserves the caller's retry. For `stream`, a
+ * switch is only possible before the first event is yielded.
  */
 export class PoolProvider implements Provider {
   readonly name: string;
@@ -227,7 +228,10 @@ export class PoolProvider implements Provider {
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
     const model = options.model;
     const { attempts, allCooling } = this.plan(model);
-    const takeover = attempts.length > 1;
+    // Disable per-attempt retry when the pool orchestrates failover, or when
+    // this is a last-ditch try while every member is already cooling — sitting
+    // on a multi-hour subscription Retry-After would hang the request.
+    const takeover = attempts.length > 1 || allCooling;
     let lastError: unknown;
     for (const [i, member] of attempts.entries()) {
       let yielded = false;
@@ -269,7 +273,8 @@ export class PoolProvider implements Provider {
     invoke: (provider: Provider, opts: O) => Promise<R>,
   ): Promise<R> {
     const { attempts, allCooling } = this.plan(model);
-    const takeover = attempts.length > 1;
+    // See stream(): also force retry:false on an all-cooling last-ditch try.
+    const takeover = attempts.length > 1 || allCooling;
     let lastError: unknown;
     for (const [i, member] of attempts.entries()) {
       try {

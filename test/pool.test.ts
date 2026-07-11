@@ -157,6 +157,28 @@ test("pool: throws a clear error when all members are cooling", async () => {
   });
 });
 
+test("pool: all-cooling last-ditch forces retry:false (no Retry-After hang)", async () => {
+  /** Records the `retry` option the pool passed through. */
+  class SpyFake extends Fake {
+    lastRetry: GenerateOptions["retry"];
+    override async generate(options: GenerateOptions): Promise<GenerateResult> {
+      this.lastRetry = options.retry;
+      return super.generate(options);
+    }
+  }
+  const a = new SpyFake();
+  const b = new SpyFake();
+  a.fail = () => rateLimit(300_000);
+  b.fail = () => rateLimit(300_000);
+  const pool = createPool({ members: [{ provider: a }, { provider: b }], ...silent });
+
+  await assert.rejects(pool.generate(gen("m1"))); // both cooling
+  // Last-ditch: only one attempt, but must still disable per-attempt retry.
+  await assert.rejects(pool.generate(gen("m1")));
+  const ditched = a.lastRetry === false || b.lastRetry === false;
+  assert.equal(ditched, true);
+});
+
 test("pool: caps a retry-after cooldown at maxCooldownMs", async () => {
   const a = new Fake();
   a.fail = () => rateLimit(60 * 60 * 1000); // 1 hour

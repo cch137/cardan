@@ -83,13 +83,17 @@ export async function withRetry<T>(
       if (!isCardanError(error) || !error.retryable || attempt >= options.maxRetries) {
         throw error;
       }
-      // jittered backoff is capped by maxDelayMs; an explicit Retry-After is
-      // authoritative and honored as-is (the caller's signal bounds it).
+      // Cap every wait at maxDelayMs. A multi-hour subscription Retry-After
+      // must not hang the request; long cooldowns belong to the pool, not
+      // withRetry. Caller's `signal` still bounds the overall attempt.
       const backoff = Math.min(
         options.initialDelayMs * 2 ** attempt,
         options.maxDelayMs,
       );
-      const wait = error.retryAfterMs ?? Math.random() * backoff;
+      const wait = Math.min(
+        error.retryAfterMs ?? Math.random() * backoff,
+        options.maxDelayMs,
+      );
       await delay(wait, signal);
       attempt++;
     }

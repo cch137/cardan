@@ -95,26 +95,34 @@ test("oauth mode: a bare token string is shorthand for credentials.accessToken",
 
 test("oauth mode: a 429 surfaces the unified reset as resetAt", async () => {
   const resetEpoch = Math.floor(Date.now() / 1000) + 3600;
-  const fetch429: typeof globalThis.fetch = async (input) =>
-    String(input).includes("oauth/token")
-      ? tokenResponse({})
-      : new Response(JSON.stringify({ error: { message: "rate limited" } }), {
-          status: 429,
-          headers: {
-            "content-type": "application/json",
-            "anthropic-ratelimit-unified-reset": String(resetEpoch),
-          },
-        });
-  const provider = new AnthropicProvider({ oauth: "AT", fetch: fetch429, retry: false });
+  let calls = 0;
+  const fetch429: typeof globalThis.fetch = async (input) => {
+    if (String(input).includes("oauth/token")) return tokenResponse({});
+    calls++;
+    return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+      status: 429,
+      headers: {
+        "content-type": "application/json",
+        "anthropic-ratelimit-unified-reset": String(resetEpoch),
+        // Multi-hour Retry-After must NOT cause a hang: subscription 429s are
+        // non-retryable so the default withRetry path throws immediately.
+        "retry-after": String(3600),
+      },
+    });
+  };
+  const provider = new AnthropicProvider({ oauth: "AT", fetch: fetch429 });
   await assert.rejects(
     provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "hi")] }),
     (err: unknown) => {
       assert.ok(err instanceof CardanError);
       assert.equal(err.code, "rate_limit");
       assert.equal(err.resetAt, resetEpoch * 1000);
+      assert.equal(err.retryable, false);
       return true;
     },
   );
+  // Only one attempt — did not sit on the 1h Retry-After.
+  assert.equal(calls, 1);
 });
 
 test("oauth mode: no api key required (does not throw)", async () => {

@@ -685,13 +685,21 @@ export class AnthropicProvider implements Provider {
     ) {
       code = "context_length";
     }
+    const resetAt =
+      code === "rate_limit" ? unifiedResetMs(response.headers) : undefined;
+    // Subscription-window 429s carry an absolute reset (often hours out).
+    // Retrying the same account before that window is futile and can hang a
+    // request for the full Retry-After; mark non-retryable so the pool can
+    // fail over immediately (or the caller can surface the error).
+    const subscriptionQuota = code === "rate_limit" && resetAt !== undefined;
     return new CardanError(code, message, {
       provider: this.name,
       status: response.status,
       retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
       // subscription quota carries an exact reset (epoch s) in the unified
       // headers rather than Retry-After; surface it for precise pool cooldowns
-      resetAt: code === "rate_limit" ? unifiedResetMs(response.headers) : undefined,
+      resetAt,
+      ...(subscriptionQuota ? { retryable: false } : {}),
       raw,
     });
   }
@@ -949,8 +957,14 @@ export class AnthropicProvider implements Provider {
           const error = event.error as
             | { type?: string; message?: string }
             | undefined;
+          const code =
+            error?.type === "overloaded_error"
+              ? "overloaded"
+              : error?.type === "rate_limit_error"
+              ? "rate_limit"
+              : "server";
           throw new CardanError(
-            error?.type === "overloaded_error" ? "overloaded" : "server",
+            code,
             error?.message ?? "stream error",
             { provider: this.name, raw: event, retryable: false },
           );

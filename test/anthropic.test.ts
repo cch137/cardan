@@ -375,6 +375,26 @@ test("stream error events raise CardanError", async () => {
   );
 });
 
+test("stream rate_limit_error maps to rate_limit (not server)", async () => {
+  const sse =
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":1}}}\n\n' +
+    'event: error\ndata: {"type":"error","error":{"type":"rate_limit_error","message":"usage limit reached"}}\n\n';
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => new Response(sse, { status: 200 })]),
+    retry: false,
+  });
+  await assert.rejects(
+    collectStream(
+      provider.stream({ model: "claude-opus-4-8", messages: [textMessage("user", "q")] }),
+    ),
+    (error: unknown) =>
+      error instanceof CardanError &&
+      error.code === "rate_limit" &&
+      error.retryable === false,
+  );
+});
+
 test("web search: injects server tool with mapped options", async () => {
   const captured: Captured[] = [];
   const provider = new AnthropicProvider({
