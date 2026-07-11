@@ -1,5 +1,5 @@
 import { CardanError, wrapFetchError } from "../errors.js";
-import type { Provider, RetryOptions } from "../types.js";
+import type { GenerateOptions, Provider, RetryOptions } from "../types.js";
 import { GroqProvider } from "./groq.js";
 
 /**
@@ -294,6 +294,23 @@ export class XAIOAuthProvider extends GroqProvider {
       retry: options.retry,
       timeoutMs: options.timeoutMs,
     });
+  }
+
+  /**
+   * Unlike Groq (which side-channels usage via `x_groq.usage`), the CLI proxy
+   * follows stock Chat Completions semantics: streaming responses carry no
+   * usage unless `stream_options.include_usage` is requested, so without this
+   * every streamed turn reports zero tokens.
+   */
+  protected override async buildRequestBody(
+    options: GenerateOptions,
+    stream: boolean,
+  ): Promise<Record<string, unknown>> {
+    const body = await super.buildRequestBody(options, stream);
+    if (stream && body.stream_options === undefined) {
+      body.stream_options = { include_usage: true };
+    }
+    return body;
   }
 }
 

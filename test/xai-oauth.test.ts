@@ -194,3 +194,66 @@ test("no refresh token: a 401 surfaces as an auth error", async () => {
     /nope|auth|401/i,
   );
 });
+
+test("streaming requests include stream_options.include_usage (proxy sends no usage otherwise)", async () => {
+  const chunks = [
+    '{"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}',
+    '{"choices":[],"usage":{"prompt_tokens":189,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":128}}}',
+    "[DONE]",
+  ];
+  const sse = chunks.map((chunk) => `data: ${chunk}\n\n`).join("");
+  const calls: Call[] = [];
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: routedFetch({ calls, onChat: () => new Response(sse, { status: 200 }) }),
+  });
+
+  let usage: unknown;
+  for await (const event of provider.stream({
+    model: "grok-4.5",
+    messages: [textMessage("user", "hi")],
+  })) {
+    if (event.type === "finish") usage = event.usage;
+  }
+
+  const body = JSON.parse(calls[0]!.body) as Record<string, unknown>;
+  assert.deepEqual(body.stream_options, { include_usage: true });
+  assert.deepEqual(usage, {
+    input: { total: 189, details: { cache_read: 128 } },
+    output: { total: 1, details: {} },
+  });
+});
+
+test("caller-provided stream_options is not overridden", async () => {
+  const sse = [
+    'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n',
+    "data: [DONE]\n\n",
+  ].join("");
+  const calls: Call[] = [];
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: routedFetch({ calls, onChat: () => new Response(sse, { status: 200 }) }),
+  });
+  for await (
+    const _ of provider.stream({
+      model: "grok-4.5",
+      messages: [textMessage("user", "hi")],
+      providerOptions: { stream_options: { include_usage: false } },
+    })
+  ) {
+    // drain
+  }
+  const body = JSON.parse(calls[0]!.body) as Record<string, unknown>;
+  assert.deepEqual(body.stream_options, { include_usage: false });
+});
+
+test("non-streaming requests carry no stream_options", async () => {
+  const calls: Call[] = [];
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: routedFetch({ calls, onChat: () => chatResponse() }),
+  });
+  await provider.generate({ model: "grok-4.5", messages: [textMessage("user", "hi")] });
+  const body = JSON.parse(calls[0]!.body) as Record<string, unknown>;
+  assert.equal(body.stream_options, undefined);
+});

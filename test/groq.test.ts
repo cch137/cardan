@@ -495,3 +495,80 @@ test("web search: rejects models without web search", async () => {
       error instanceof CardanError && error.code === "invalid_request",
   );
 });
+
+test("x-ratelimit headers: parsed into result.rateLimit and the provider getter", async () => {
+  const headers = {
+    "content-type": "application/json",
+    "x-ratelimit-limit-requests": "480",
+    "x-ratelimit-remaining-requests": "479",
+    "x-ratelimit-limit-tokens": "10000000",
+    "x-ratelimit-remaining-tokens": "9999810",
+    "x-ratelimit-reset-tokens": "2m59.56s",
+  };
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch([
+      () => new Response(JSON.stringify(CHAT_FIXTURE), { status: 200, headers }),
+    ]),
+  });
+  assert.equal(provider.rateLimit, undefined);
+
+  const before = Date.now();
+  const result = await provider.generate({
+    model: "openai/gpt-oss-120b",
+    messages: [textMessage("user", "q")],
+  });
+
+  assert.deepEqual(result.rateLimit?.requests, { limit: 480, remaining: 479 });
+  assert.equal(result.rateLimit?.tokens?.limit, 10_000_000);
+  assert.equal(result.rateLimit?.tokens?.remaining, 9_999_810);
+  // "2m59.56s" ≈ 179 560 ms from now
+  const resetAt = result.rateLimit?.tokens?.resetAt ?? 0;
+  assert.ok(resetAt >= before + 179_000 && resetAt <= Date.now() + 180_000);
+  assert.deepEqual(provider.rateLimit, result.rateLimit);
+});
+
+test("x-ratelimit headers: attached to the stream finish event", async () => {
+  const chunks = [
+    '{"choices":[{"index":0,"delta":{"content":"yo"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":4}}',
+    "[DONE]",
+  ];
+  const sse = chunks.map((chunk) => `data: ${chunk}\n\n`).join("");
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch([
+      () =>
+        new Response(sse, {
+          status: 200,
+          headers: {
+            "x-ratelimit-limit-requests": "480",
+            "x-ratelimit-remaining-requests": "478",
+          },
+        }),
+    ]),
+  });
+  let finishRateLimit: unknown;
+  for await (const event of provider.stream({
+    model: "openai/gpt-oss-120b",
+    messages: [textMessage("user", "q")],
+  })) {
+    if (event.type === "finish") finishRateLimit = event.rateLimit;
+  }
+  assert.deepEqual(finishRateLimit, {
+    requests: { limit: 480, remaining: 478 },
+  });
+  assert.deepEqual(provider.rateLimit, finishRateLimit);
+});
+
+test("responses without x-ratelimit headers leave rateLimit unset", async () => {
+  const provider = new GroqProvider({
+    apiKey: "gsk-test",
+    fetch: mockFetch([() => jsonResponse(CHAT_FIXTURE)]),
+  });
+  const result = await provider.generate({
+    model: "openai/gpt-oss-120b",
+    messages: [textMessage("user", "q")],
+  });
+  assert.equal(result.rateLimit, undefined);
+  assert.equal(provider.rateLimit, undefined);
+});

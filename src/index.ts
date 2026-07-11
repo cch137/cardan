@@ -58,6 +58,7 @@ export type {
   ImagePart,
   Message,
   Provider,
+  RateLimitCounter,
   RateLimitStatus,
   RateLimitWindow,
   ReasoningEffort,

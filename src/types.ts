@@ -147,6 +147,21 @@ export interface RateLimitWindow {
 }
 
 /**
+ * One counter-style throttle window, from OpenAI-wire `x-ratelimit-*` response
+ * headers (`limit`/`remaining` pairs for requests and tokens). Short rolling
+ * windows (typically per-minute) — a live throughput view, not subscription
+ * quota.
+ */
+export interface RateLimitCounter {
+  /** Window capacity (`x-ratelimit-limit-*`). */
+  limit: number;
+  /** Capacity left in the current window (`x-ratelimit-remaining-*`). */
+  remaining: number;
+  /** When the counter refills, epoch ms (`x-ratelimit-reset-*`), if reported. */
+  resetAt?: number;
+}
+
+/**
  * Subscription rate-limit snapshot parsed from a response's rate-limit headers.
  * Anthropic (Claude.ai OAuth) reports rolling 5-hour and 7-day windows plus a
  * "representative" view of whichever is currently binding; other providers may
@@ -165,6 +180,10 @@ export interface RateLimitStatus {
   fiveHour?: RateLimitWindow;
   /** The rolling 7-day subscription window. */
   sevenDay?: RateLimitWindow;
+  /** Requests-per-window counter (OpenAI-wire `x-ratelimit-*-requests`). */
+  requests?: RateLimitCounter;
+  /** Tokens-per-window counter (OpenAI-wire `x-ratelimit-*-tokens`). */
+  tokens?: RateLimitCounter;
 }
 
 // ---------------------------------------------------------------------------

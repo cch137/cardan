@@ -29,6 +29,8 @@ import {
   type GenerateResult,
   type Message,
   type Provider,
+  type RateLimitCounter,
+  type RateLimitStatus,
   type ReasoningEffort,
   type RetryOptions,
   type StreamEvent,
@@ -170,6 +172,16 @@ export class GroqProvider implements Provider {
   readonly name: string = "groq";
   private readonly options: GroqProviderOptions;
   private readonly fetch: typeof globalThis.fetch;
+  private lastRateLimit?: RateLimitStatus;
+
+  /**
+   * The throttle-counter snapshot from the most recent response that carried
+   * `x-ratelimit-*` headers, or `undefined` if none has been seen yet. A
+   * last-known view, overwritten on each such response — not an accumulator.
+   */
+  get rateLimit(): RateLimitStatus | undefined {
+    return this.lastRateLimit;
+  }
 
   constructor(options: GroqProviderOptions = {}) {
     this.options = options;
@@ -185,8 +197,12 @@ export class GroqProvider implements Provider {
       retry,
       options.signal,
     );
+    const rateLimit = parseCounterRateLimit(response.headers);
+    if (rateLimit) this.lastRateLimit = rateLimit;
     const raw = (await response.json()) as ChatResponseBody;
-    return this.parseResponse(raw, options);
+    const result = this.parseResponse(raw, options);
+    if (rateLimit) result.rateLimit = rateLimit;
+    return result;
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
@@ -203,7 +219,9 @@ export class GroqProvider implements Provider {
         provider: this.name,
       });
     }
-    yield* this.parseStream(response.body);
+    const rateLimit = parseCounterRateLimit(response.headers);
+    if (rateLimit) this.lastRateLimit = rateLimit;
+    yield* this.parseStream(response.body, rateLimit);
   }
 
   embed(_options: EmbedOptions): Promise<EmbedResult> {
@@ -288,7 +306,7 @@ export class GroqProvider implements Provider {
     });
   }
 
-  private async buildRequestBody(
+  protected async buildRequestBody(
     options: GenerateOptions,
     stream: boolean,
   ): Promise<Record<string, unknown>> {
@@ -428,6 +446,7 @@ export class GroqProvider implements Provider {
 
   private async *parseStream(
     body: ReadableStream<Uint8Array>,
+    rateLimit?: RateLimitStatus,
   ): AsyncGenerator<StreamEvent> {
     // tool call fragments accumulate per index until the choice finishes
     const pending = new Map<number, { id: string; name: string; args: string }>();
@@ -456,6 +475,7 @@ export class GroqProvider implements Provider {
           reason: finishReason,
           usage,
           ...(citations.length ? { citations } : {}),
+          ...(rateLimit ? { rateLimit } : {}),
         };
         return;
       }
@@ -518,6 +538,7 @@ export class GroqProvider implements Provider {
         reason: finishReason,
         usage,
         ...(citations.length ? { citations } : {}),
+        ...(rateLimit ? { rateLimit } : {}),
       };
       return;
     }
@@ -530,6 +551,52 @@ export class GroqProvider implements Provider {
 // ---------------------------------------------------------------------------
 // Conversion helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Parse a `x-ratelimit-reset-*` value into epoch ms. OpenAI-wire servers send
+ * Go-style durations (`2m59.56s`, `250ms`) or bare seconds; the Grok CLI proxy
+ * omits the header entirely.
+ */
+function resetDurationMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const bare = Number(value);
+  if (Number.isFinite(bare)) return Date.now() + bare * 1000;
+  let ms = 0;
+  let matched = false;
+  for (const [, num, unit] of value.matchAll(/(\d+(?:\.\d+)?)(h|m(?!s)|s|ms)/g)) {
+    matched = true;
+    const n = Number(num);
+    ms += unit === "h" ? n * 3_600_000 : unit === "m" ? n * 60_000 : unit === "s" ? n * 1000 : n;
+  }
+  return matched ? Date.now() + ms : undefined;
+}
+
+/** One `x-ratelimit-{limit,remaining,reset}-<kind>` counter, if reported. */
+function parseCounter(headers: Headers, kind: string): RateLimitCounter | undefined {
+  const limitRaw = headers.get(`x-ratelimit-limit-${kind}`);
+  const remainingRaw = headers.get(`x-ratelimit-remaining-${kind}`);
+  if (limitRaw === null || remainingRaw === null) return undefined;
+  const limit = Number(limitRaw);
+  const remaining = Number(remainingRaw);
+  if (!Number.isFinite(limit) || !Number.isFinite(remaining)) return undefined;
+  const resetAt = resetDurationMs(headers.get(`x-ratelimit-reset-${kind}`));
+  return { limit, remaining, ...(resetAt !== undefined ? { resetAt } : {}) };
+}
+
+/**
+ * The throttle-counter snapshot from a response's OpenAI-wire `x-ratelimit-*`
+ * headers, or `undefined` if none are present. Groq and the Grok CLI proxy
+ * both report requests and tokens counters over short rolling windows.
+ */
+function parseCounterRateLimit(headers: Headers): RateLimitStatus | undefined {
+  const requests = parseCounter(headers, "requests");
+  const tokens = parseCounter(headers, "tokens");
+  if (!requests && !tokens) return undefined;
+  return {
+    ...(requests ? { requests } : {}),
+    ...(tokens ? { tokens } : {}),
+  };
+}
 
 /**
  * Best-effort extraction of cited sources from a Groq message. Compound
