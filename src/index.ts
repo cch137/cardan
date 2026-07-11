@@ -1,4 +1,4 @@
-import { CardanError } from "./errors.js";
+import { CardanError, isCardanError } from "./errors.js";
 import {
   AnthropicProvider,
   type AnthropicModelId,
@@ -35,6 +35,9 @@ import type {
   GenerateResult,
   Provider,
   StreamEvent,
+  TelemetryEvent,
+  TelemetryOptions,
+  Usage,
 } from "./types.js";
 import type { Infer, SchemaInput } from "./schema.js";
 import { Conversation, type ConversationOptions } from "./conversation.js";
@@ -56,6 +59,8 @@ export type {
   RetryOptions,
   Role,
   StreamEvent,
+  TelemetryEvent,
+  TelemetryOptions,
   TextPart,
   ThinkingPart,
   Tool,
@@ -167,9 +172,31 @@ export interface CardanConfig {
   xai?: XAIProviderOptions;
   /** Additional or overriding providers, keyed by prefix. */
   providers?: Record<string, Provider>;
+  /**
+   * Global observer fired once per logical `generate` / `stream` / `embed`
+   * (after pool failover / per-attempt retries). Absent = no instrumentation.
+   */
+  telemetry?: TelemetryOptions;
 }
 
 type Prefixed<T extends { model: string }> = Omit<T, "model"> & { model: ModelId };
+
+/** Error fields copied into a failed {@link TelemetryEvent}. */
+function telemetryErrorFields(
+  error: unknown,
+): Pick<TelemetryEvent, "errorCode" | "status" | "retryAfterMs" | "resetAt"> {
+  if (isCardanError(error)) {
+    return {
+      errorCode: error.code,
+      ...(error.status !== undefined ? { status: error.status } : {}),
+      ...(error.retryAfterMs !== undefined
+        ? { retryAfterMs: error.retryAfterMs }
+        : {}),
+      ...(error.resetAt !== undefined ? { resetAt: error.resetAt } : {}),
+    };
+  }
+  return { errorCode: "unknown" };
+}
 
 export class Cardan {
   private readonly config: CardanConfig;
@@ -211,18 +238,48 @@ export class Cardan {
     return provider;
   }
 
-  generate<S extends SchemaInput = SchemaInput>(
+  async generate<S extends SchemaInput = SchemaInput>(
     options: Prefixed<GenerateOptions<S>>,
   ): Promise<GenerateResult<Infer<S>>> {
-    const { provider, model } = this.route(options.model);
-    return provider.generate({ ...options, model }) as Promise<
-      GenerateResult<Infer<S>>
-    >;
+    const { provider, model, prefix } = this.route(options.model);
+    if (!this.config.telemetry?.onRequest) {
+      return provider.generate({ ...options, model }) as Promise<
+        GenerateResult<Infer<S>>
+      >;
+    }
+    const start = Date.now();
+    try {
+      const result = (await provider.generate({
+        ...options,
+        model,
+      })) as GenerateResult<Infer<S>>;
+      this.emitTelemetry({
+        provider: prefix,
+        model,
+        op: "generate",
+        ok: true,
+        durationMs: Date.now() - start,
+        usage: result.usage,
+      });
+      return result;
+    } catch (error) {
+      this.emitTelemetry({
+        provider: prefix,
+        model,
+        op: "generate",
+        ok: false,
+        durationMs: Date.now() - start,
+        ...telemetryErrorFields(error),
+      });
+      throw error;
+    }
   }
 
   stream(options: Prefixed<GenerateOptions>): AsyncIterable<StreamEvent> {
-    const { provider, model } = this.route(options.model);
-    return provider.stream({ ...options, model });
+    const { provider, model, prefix } = this.route(options.model);
+    const inner = provider.stream({ ...options, model });
+    if (!this.config.telemetry?.onRequest) return inner;
+    return this.streamWithTelemetry(inner, prefix, model);
   }
 
   /** Start a stateful {@link Conversation} bound to this client's config. */
@@ -237,18 +294,52 @@ export class Cardan {
     return new Agent(this, spec);
   }
 
-  embed(options: Prefixed<EmbedOptions>): Promise<EmbedResult> {
-    const { provider, model } = this.route(options.model);
-    if (!provider.embed) {
-      throw new CardanError(
-        "invalid_request",
-        `provider "${provider.name}" does not support embeddings`,
-      );
+  async embed(options: Prefixed<EmbedOptions>): Promise<EmbedResult> {
+    const { provider, model, prefix } = this.route(options.model);
+    if (!this.config.telemetry?.onRequest) {
+      if (!provider.embed) {
+        throw new CardanError(
+          "invalid_request",
+          `provider "${provider.name}" does not support embeddings`,
+        );
+      }
+      return provider.embed({ ...options, model });
     }
-    return provider.embed({ ...options, model });
+    const start = Date.now();
+    try {
+      if (!provider.embed) {
+        throw new CardanError(
+          "invalid_request",
+          `provider "${provider.name}" does not support embeddings`,
+        );
+      }
+      const result = await provider.embed({ ...options, model });
+      this.emitTelemetry({
+        provider: prefix,
+        model,
+        op: "embed",
+        ok: true,
+        durationMs: Date.now() - start,
+      });
+      return result;
+    } catch (error) {
+      this.emitTelemetry({
+        provider: prefix,
+        model,
+        op: "embed",
+        ok: false,
+        durationMs: Date.now() - start,
+        ...telemetryErrorFields(error),
+      });
+      throw error;
+    }
   }
 
-  private route(id: string): { provider: Provider; model: string } {
+  private route(id: string): {
+    provider: Provider;
+    model: string;
+    prefix: string;
+  } {
     const slash = id.indexOf("/");
     if (slash <= 0 || slash === id.length - 1) {
       throw new CardanError(
@@ -256,10 +347,78 @@ export class Cardan {
         `invalid model id "${id}": expected "provider/model"`,
       );
     }
+    const prefix = id.slice(0, slash);
     return {
-      provider: this.provider(id.slice(0, slash)),
+      provider: this.provider(prefix),
       model: id.slice(slash + 1),
+      prefix,
     };
+  }
+
+  /** Fire `telemetry.onRequest`, swallowing observer failures. */
+  private emitTelemetry(event: TelemetryEvent): void {
+    try {
+      this.config.telemetry?.onRequest?.(event);
+    } catch {
+      // a broken observer must never affect the request
+    }
+  }
+
+  /**
+   * Wrap a provider stream: one telemetry event on normal completion, throw,
+   * or early consumer abandon (`return` before finish → `ok: true`, no usage).
+   * `durationMs` starts at the first `next()`.
+   */
+  private async *streamWithTelemetry(
+    source: AsyncIterable<StreamEvent>,
+    prefix: string,
+    model: string,
+  ): AsyncGenerator<StreamEvent> {
+    let started = false;
+    let start = 0;
+    let usage: Usage | undefined;
+    let emitted = false;
+
+    const fire = (partial: {
+      ok: boolean;
+      usage?: Usage;
+      errorCode?: TelemetryEvent["errorCode"];
+      status?: number;
+      retryAfterMs?: number;
+      resetAt?: number;
+    }): void => {
+      if (emitted) return;
+      emitted = true;
+      this.emitTelemetry({
+        provider: prefix,
+        model,
+        op: "stream",
+        durationMs: started ? Date.now() - start : 0,
+        ...partial,
+      });
+    };
+
+    try {
+      const it = source[Symbol.asyncIterator]();
+      while (true) {
+        if (!started) {
+          started = true;
+          start = Date.now();
+        }
+        const step = await it.next();
+        if (step.done) break;
+        const event = step.value;
+        if (event.type === "finish") usage = event.usage;
+        yield event;
+      }
+      fire({ ok: true, ...(usage !== undefined ? { usage } : {}) });
+    } catch (error) {
+      fire({ ok: false, ...telemetryErrorFields(error) });
+      throw error;
+    } finally {
+      // consumer abandoned the iterator before finish/error
+      if (!emitted) fire({ ok: true });
+    }
   }
 }
 

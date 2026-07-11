@@ -203,6 +203,29 @@ await cardan.generate({ model: "openai/gpt-5.6-sol", messages });        // → 
 
 A pool also nests: a `PoolProvider` can itself be a member of another pool (e.g. group several account pools), and the `Conversation`/`Agent` layers accept it wherever they accept a `Cardan` or provider.
 
+### Telemetry
+
+`createCardan({ telemetry: { onRequest } })` observes every logical request at the routing layer — once per `generate` / `stream` / `embed`, after pool failover and per-attempt retries. No call-site instrumentation needed. Absent `telemetry` is a no-op.
+
+```ts
+const cardan = createCardan({
+  telemetry: {
+    onRequest(event) {
+      // event: { provider, model, op, ok, durationMs, usage?, errorCode?, status?, … }
+      metrics.record(event);
+    },
+  },
+});
+```
+
+- **`provider`** is the routing prefix (`"anthropic"` even when that slot holds a pool); **`model`** is the id without the prefix.
+- **Success**: `ok: true`; `generate` includes `result.usage`; `stream` includes the `finish` event's usage; `embed` omits usage.
+- **Failure**: `ok: false` with `errorCode` (and `status` / `retryAfterMs` / `resetAt` when the error is a `CardanError`); the original error is rethrown.
+- **Stream abandon**: if the consumer stops iterating before `finish`, one event fires with `ok: true` and no usage (not treated as an error). `durationMs` starts at the first `next()`.
+- Observer exceptions are swallowed so a broken sink cannot break requests.
+
+This is separate from Conversation's per-`ask` `onCall` telemetry (turn-level, with labels/steps).
+
 - **Rotation**: a fixed, evenly-interleaved round-robin built from member `weight`s (default 1); each request takes the next slot.
 - **Failover**: on a `rate_limit | auth | server | network | timeout` error it switches to the next *distinct* member and retries (the pool owns this retry, so per-attempt provider retry is disabled while ≥2 members are tried, and also on an all-cooling last-ditch attempt). `maxFailovers` caps switches; `shouldFailover` customizes which errors qualify. For `stream`, a switch is only possible before the first event.
 - **Cooldown**: a failed member is skipped on later requests until it recovers, scoped to the error's signal. An absolute `resetAt` (exact, uncapped — e.g. Anthropic's *account-wide* subscription window reset, read from the `anthropic-ratelimit-unified-reset` header) cools the **whole member across every model**. A relative `Retry-After` (limit may be per-model, e.g. OpenAI TPM) cools **only that model**, so a 429 on `opus` doesn't sideline `sonnet` (capped by `maxCooldownMs`, default 15 min). With neither signal, no cooldown (failover only) — a transient fault isn't necessarily an account problem. Cooled members thaw automatically when the deadline passes.

@@ -1,3 +1,4 @@
+import type { ErrorCode } from "./errors.js";
 import type { SchemaInput } from "./schema.js";
 
 // ---------------------------------------------------------------------------
@@ -412,6 +413,45 @@ export interface EmbedResult {
   embeddings: number[][];
   usage: Usage;
   raw: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// Client telemetry (Cardan routing layer)
+// ---------------------------------------------------------------------------
+
+/**
+ * One logical request observed by {@link TelemetryOptions.onRequest}. Fired
+ * once per `generate` / `stream` / `embed` after any pool failover or
+ * per-attempt retries — pool switches are internal to the provider.
+ */
+export interface TelemetryEvent {
+  /** Routing prefix, e.g. `"anthropic"` (includes a pooled provider under that slot). */
+  provider: string;
+  /** Model id without the provider prefix. */
+  model: string;
+  op: "generate" | "stream" | "embed";
+  ok: boolean;
+  /** Wall-clock duration in milliseconds. For `stream`, starts at the first `next()`. */
+  durationMs: number;
+  /** When `!ok`: `CardanError.code`, or `"unknown"` for non-cardan throws. */
+  errorCode?: ErrorCode;
+  /** `CardanError.status` when present. */
+  status?: number;
+  /** `CardanError.retryAfterMs` when present. */
+  retryAfterMs?: number;
+  /** `CardanError.resetAt` when present. */
+  resetAt?: number;
+  /** `generate`: `result.usage`; `stream`: `finish` event usage; `embed`: omit. */
+  usage?: Usage;
+}
+
+/** Global observer for every request routed through a {@link Cardan} client. */
+export interface TelemetryOptions {
+  /**
+   * Invoked once per logical request. Exceptions are swallowed so a broken
+   * observer cannot affect the request.
+   */
+  onRequest?(event: TelemetryEvent): void;
 }
 
 // ---------------------------------------------------------------------------
