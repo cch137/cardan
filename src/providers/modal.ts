@@ -2,6 +2,7 @@ import {
   CardanError,
   codeFromStatus,
   parseRetryAfter,
+  streamCardanError,
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
@@ -457,11 +458,7 @@ export class ModalProvider implements Provider {
         continue;
       }
       if (chunk.error) {
-        throw new CardanError(
-          "server",
-          chunk.error.message ?? "stream error",
-          { provider: this.name, raw: chunk, retryable: false },
-        );
+        throw streamCardanError(chunk, this.name);
       }
       if (chunk.usage) usage = mapUsage(chunk.usage);
       const choice = chunk.choices?.[0];

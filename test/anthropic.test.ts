@@ -391,7 +391,27 @@ test("stream rate_limit_error maps to rate_limit (not server)", async () => {
     (error: unknown) =>
       error instanceof CardanError &&
       error.code === "rate_limit" &&
+      error.message === "usage limit reached" &&
       error.retryable === false,
+  );
+});
+
+test("stream authentication_error surfaces message and auth code", async () => {
+  const sse =
+    'event: error\ndata: {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}\n\n';
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => new Response(sse, { status: 200 })]),
+    retry: false,
+  });
+  await assert.rejects(
+    collectStream(
+      provider.stream({ model: "claude-opus-4-8", messages: [textMessage("user", "q")] }),
+    ),
+    (error: unknown) =>
+      error instanceof CardanError &&
+      error.code === "auth" &&
+      error.message === "invalid x-api-key",
   );
 });
 

@@ -1,8 +1,10 @@
 import {
   CardanError,
   codeFromStatus,
+  extractProviderError,
   isCardanError,
   parseRetryAfter,
+  streamCardanError,
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
@@ -645,11 +647,8 @@ export class OpenAIProvider implements Provider {
           this.name,
         );
       case "error":
-        throw new CardanError("server", String(event.message ?? "stream error"), {
-          provider: this.name,
-          raw: event,
-          retryable: false,
-        });
+        // OpenAI Responses: top-level `message`/`code`; some events nest under `error`.
+        throw streamCardanError(event, this.name);
       default:
         return { events: [], done: false };
     }
@@ -995,14 +994,15 @@ function responseFailure(
   raw: OpenAIResponseBody,
   provider: string,
 ): CardanError {
-  const code = raw.error?.code;
-  const mapped: ErrorCode =
-    code === "rate_limit_exceeded"
-      ? "rate_limit"
-      : code === "server_error"
-        ? "server"
-        : "unknown";
-  return new CardanError(mapped, raw.error?.message ?? "response failed", {
+  if (!raw.error) {
+    return new CardanError("unknown", "response failed", {
+      provider,
+      raw,
+      retryable: false,
+    });
+  }
+  const extracted = extractProviderError(raw.error);
+  return new CardanError(extracted.code, extracted.message, {
     provider,
     raw,
     retryable: false,

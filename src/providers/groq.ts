@@ -2,6 +2,7 @@ import {
   CardanError,
   codeFromStatus,
   parseRetryAfter,
+  streamCardanError,
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
@@ -465,11 +466,7 @@ export class GroqProvider implements Provider {
         continue;
       }
       if (chunk.error) {
-        throw new CardanError(
-          "server",
-          chunk.error.message ?? "stream error",
-          { provider: this.name, raw: chunk, retryable: false },
-        );
+        throw streamCardanError(chunk, this.name);
       }
       // the finish_reason chunk carries usage (top-level and under x_groq)
       const chunkUsage = chunk.usage ?? chunk.x_groq?.usage;

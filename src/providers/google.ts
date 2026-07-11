@@ -2,6 +2,7 @@ import {
   CardanError,
   codeFromStatus,
   parseRetryAfter,
+  streamCardanError,
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
@@ -438,11 +439,7 @@ export class GoogleProvider implements Provider {
         continue;
       }
       if (chunk.error) {
-        throw new CardanError("server", chunk.error.message ?? "stream error", {
-          provider: this.name,
-          raw: chunk,
-          retryable: false,
-        });
+        throw streamCardanError(chunk, this.name);
       }
       // usageMetadata is cumulative; the latest chunk wins
       if (chunk.usageMetadata) usage = mapUsage(chunk.usageMetadata);

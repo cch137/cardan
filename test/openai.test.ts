@@ -341,7 +341,29 @@ test("stream failure events raise CardanError", async () => {
     collectStream(
       provider.stream({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
     ),
-    (error: unknown) => error instanceof CardanError && error.code === "server",
+    (error: unknown) =>
+      error instanceof CardanError &&
+      error.code === "server" &&
+      error.message === "boom",
+  );
+});
+
+test("stream error event uses top-level message (not bare stream error)", async () => {
+  const sse =
+    'data: {"type":"error","code":"server_error","message":"The server had an error"}\n\n';
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => new Response(sse, { status: 200 })]),
+    retry: false,
+  });
+  await assert.rejects(
+    collectStream(
+      provider.stream({ model: "gpt-5.5", messages: [textMessage("user", "q")] }),
+    ),
+    (error: unknown) =>
+      error instanceof CardanError &&
+      error.code === "server" &&
+      error.message === "The server had an error",
   );
 });
 

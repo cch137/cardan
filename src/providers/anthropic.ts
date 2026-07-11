@@ -2,6 +2,7 @@ import {
   CardanError,
   codeFromStatus,
   parseRetryAfter,
+  streamCardanError,
   wrapFetchError,
   type ErrorCode,
 } from "../errors.js";
@@ -954,20 +955,9 @@ export class AnthropicProvider implements Provider {
           addUsage(usage, perTurn);
           return { stopReason, rawBlocks };
         case "error": {
-          const error = event.error as
-            | { type?: string; message?: string }
-            | undefined;
-          const code =
-            error?.type === "overloaded_error"
-              ? "overloaded"
-              : error?.type === "rate_limit_error"
-              ? "rate_limit"
-              : "server";
-          throw new CardanError(
-            code,
-            error?.message ?? "stream error",
-            { provider: this.name, raw: event, retryable: false },
-          );
+          // Prefer nested `error` for type/message; pass the whole event so
+          // extractProviderError can also read top-level fields if needed.
+          throw streamCardanError(event, this.name);
         }
       }
     }

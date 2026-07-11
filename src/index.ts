@@ -67,7 +67,15 @@ export type {
   WebSearchOptions,
 } from "./types.js";
 export { DEFAULT_RETRY, emptyUsage, textMessage } from "./types.js";
-export { CardanError, isCardanError, type ErrorCode } from "./errors.js";
+export {
+  CardanError,
+  codeFromProviderType,
+  extractProviderError,
+  isCardanError,
+  streamCardanError,
+  type ErrorCode,
+  type ExtractedProviderError,
+} from "./errors.js";
 export type { Infer, JsonSchema, SchemaInput, ZodLikeSchema } from "./schema.js";
 export {
   type AskOptions,
