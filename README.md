@@ -25,6 +25,26 @@ Model ids are `prefix/model`. `createCardan()` reads these env vars per provider
 - **xAI auth precedence** (most explicit first): config `xaiOAuth` → config `xai.apiKey` → env `GROK_BUILD_OAUTH_TOKEN` (Grok Build subscription) → env `XAI_API_KEY`. If both env vars are set, the OAuth token wins and cardan warns. A bare env token is inference-only (no refresh); pass `xaiOAuth` for the refreshable flow.
 - **Google**: prefers `GEMINI_API_KEY`; if both it and `GOOGLE_API_KEY` are set, cardan warns (Google's own `@google/genai` prefers `GOOGLE_API_KEY`, so the two can disagree).
 
+## CLI
+
+`npx cardan detect` finds local Claude Code and Grok CLI subscription credentials and prints account info plus a ready-to-paste `.env` block; add `--all-users` to scan every readable account's home. It is read-only and never refreshes tokens. Runs on Linux, macOS, and Windows. Details in [docs/cli.md](./docs/cli.md).
+
+> **The output contains live access tokens** — treat stdout as a secret. Don't pipe it into shared logs or CI output, and note that `--all-users` can print other accounts' tokens (e.g. when run as root).
+
+```
+Anthropic (Claude Code)
+  file           ~/.claude/.credentials.json
+  subscription   pro · default_claude_ai
+  access token   valid · expires 2026-07-12 18:42 UTC
+  refresh token  present · expires 2026-08-06 21:11 UTC
+
+# .env — cardan reads these automatically
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-…
+GROK_BUILD_OAUTH_TOKEN=eyJ0…
+```
+
+Programmatically, `detectCredentials()` and `detectAllUsers()` return the same detection as structured data (rendering stays in the CLI).
+
 ## Usage
 
 ```ts

@@ -1,6 +1,6 @@
 {
   "name": "cardan",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "Zero-dependency TypeScript AI and LLM SDK for OpenAI, Anthropic, Gemini, xAI, Groq, and Modal",
   "license": "MIT",
   "author": "cch137",
@@ -55,6 +55,9 @@
   ],
   "type": "module",
   "sideEffects": false,
+  "bin": {
+    "cardan": "./dist/cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

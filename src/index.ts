@@ -102,6 +102,17 @@ export {
 } from "./conversation.js";
 export { Agent, type AgentSpec, type Memory } from "./agent.js";
 export { parallel } from "./concurrency.js";
+export {
+  detectAllUsers,
+  detectCredentials,
+  hasAnyCredential,
+  isExpired,
+  type DetectedCredential,
+  type DetectOptions,
+  type ProviderDetection,
+  type UserDetection,
+  type UserHome,
+} from "./detect.js";
 export { normalizeMessages } from "./normalize.js";
 export { collectStream, collectStreamToMessage } from "./stream.js";
 export {
