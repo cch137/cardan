@@ -46,6 +46,6 @@ detect 完全離線、純讀。兩家的 refresh token 都是旋轉式(用一次
 `.env` block 輸出的是 **access token**,而那兩個 env var 在 cardan 內被當作**不可刷新**的 bearer 直接送去推論 API,故到期即失效 —— **不能改放 refresh token**(refresh token 只在 OAuth token 端點有效,送去推論 API 會 401;且 env 在 runtime 唯讀,無法持久化旋轉後的新 refresh token)。因此:
 
 - **未過期**的 token 在 env 行上方加註 `# access token expires <time>`;有耐久替代方案的供應商(Anthropic 的 `claude setup-token`)再附上 `durableHint`(`ProviderSpec.durableHint`)。此註解讓貼上者知道這把會在幾小時內死。
-- 想要**自動保鮮**應走 config 的 `oauth`/`xaiOAuth` 物件(帶 `refreshToken` + `onRefresh`,見 [../README.md](../README.md#behavior-notes)),而非 detect 的 env block —— detect 刻意 read-only,不是長跑服務的憑證來源。
+- 想要**自動保鮮**用 [`loadLocalOAuth` / `localOAuthPool`](../README.md#local-oauth-long-running-services)(從同一批 CLI 檔建 provider 並 `onRefresh` 寫回),或手組 config 的 `oauth`/`xaiOAuth` 物件。detect 的 env block 與 detect 本身刻意 read-only,不是長跑服務的憑證來源。
 
 **安全**:輸出含明文 access token,stdout 應視為機密 —— 別導進共享 log/CI,`--all-users`(尤其以 root 執行)會印出其他帳號的 token。這是刻意的產品行為(方便貼上),非疏漏。

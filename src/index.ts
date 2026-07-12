@@ -113,6 +113,17 @@ export {
   type UserDetection,
   type UserHome,
 } from "./detect.js";
+export {
+  loadLocalOAuth,
+  loadLocalOAuthPrefix,
+  localOAuthPool,
+  persistLocalOAuth,
+  type LoadLocalOAuthOptions,
+  type LocalOAuthIO,
+  type LocalOAuthMember,
+  type LocalOAuthPrefix,
+  type LocalOAuthTokenInput,
+} from "./local-oauth.js";
 export { normalizeMessages } from "./normalize.js";
 export { collectStream, collectStreamToMessage } from "./stream.js";
 export {

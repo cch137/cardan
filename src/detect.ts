@@ -168,6 +168,11 @@ export interface ProviderDetection {
   spec: ProviderSpec;
   /** Display path of the matched file, e.g. `~/.grok/auth.json`. */
   file?: string;
+  /**
+   * Absolute path of the matched file (for persistence / `loadLocalOAuth`).
+   * Present whenever {@link file} is set.
+   */
+  path?: string;
   cred?: DetectedCredential;
 }
 
@@ -205,9 +210,11 @@ export interface UsersIO {
 
 export function detectProvider(spec: ProviderSpec, io: DetectIO): ProviderDetection {
   let file: string | undefined;
+  let path: string | undefined;
   let cred: DetectedCredential | undefined;
   for (const name of candidateFileNames(spec.ownNames)) {
-    const raw = io.readFile(`${io.home}/${spec.dir}/${name}`);
+    const abs = `${io.home}/${spec.dir}/${name}`;
+    const raw = io.readFile(abs);
     if (raw === undefined) continue;
     let json: unknown;
     try {
@@ -218,11 +225,12 @@ export function detectProvider(spec: ProviderSpec, io: DetectIO): ProviderDetect
     const extracted = spec.extract(json);
     if (extracted) {
       file = `~/${spec.dir}/${name}`;
+      path = abs;
       cred = extracted;
       break;
     }
   }
-  return { spec, file, cred };
+  return { spec, file, path, cred };
 }
 
 export function detectAll(io: DetectIO): ProviderDetection[] {

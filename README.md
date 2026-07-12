@@ -45,6 +45,34 @@ GROK_BUILD_OAUTH_TOKEN=eyJ0…
 
 Programmatically, `detectCredentials()` and `detectAllUsers()` return the same detection as structured data (rendering stays in the CLI).
 
+### Local OAuth (long-running services)
+
+`detect` is read-only. For a service that should stay logged in, use **`loadLocalOAuth` / `localOAuthPool`**: they build providers from the same CLI files, wire `onRefresh` to write rotated tokens back, and optionally merge bare env tokens (deduped — file wins).
+
+```ts
+import { createCardan, localOAuthPool, loadLocalOAuthPrefix } from "cardan";
+
+// One-liner pool (files + env), or undefined when nothing found
+const anthropic = await localOAuthPool("anthropic", {
+  files: false, // setup-token only
+  env: ["CLAUDE_CODE_OAUTH_TOKEN1", "CLAUDE_CODE_OAUTH_TOKEN2"],
+});
+
+const xaiMembers = await loadLocalOAuthPrefix("xai", {
+  env: ["GROK_BUILD_OAUTH_TOKEN"], // deduped if same as ~/.grok/auth.json
+});
+// xaiMembers[i].provider is XAIOAuthProvider (subscriptionUsage, …)
+
+const cardan = createCardan({
+  providers: {
+    ...(anthropic ? { anthropic } : {}),
+    ...(xaiMembers.length
+      ? { xai: await localOAuthPool("xai", { env: ["GROK_BUILD_OAUTH_TOKEN"] }) }
+      : {}),
+  },
+});
+```
+
 ## Usage
 
 ```ts
