@@ -162,12 +162,12 @@ export interface RateLimitCounter {
 }
 
 /**
- * Subscription rate-limit snapshot parsed from a response's rate-limit headers.
- * Anthropic (Claude.ai OAuth) reports rolling 5-hour and 7-day windows plus a
- * "representative" view of whichever is currently binding; other providers may
- * populate none of it. Lowest common denominator — fields are present only when
- * the provider reports them. Surfaced so callers (and {@link Provider} pools)
- * can rotate or throttle *before* hitting a hard rate-limit error.
+ * Subscription rate-limit snapshot. Anthropic (Claude.ai OAuth) fills this from
+ * unified response headers (5h + 7d); xAI Grok OAuth fills `sevenDay` from
+ * `GET /v1/billing?format=credits` (SuperGrok weekly pool). Fields are present
+ * only when the provider reports them. Surfaced so callers (and
+ * {@link Provider} pools) can observe remaining quota — the pool still only
+ * cools members on real rate-limit errors, not soft-warning snapshots.
  */
 export interface RateLimitStatus {
   /** Which window is currently binding (e.g. `five_hour` | `seven_day`), if reported. */
@@ -176,9 +176,9 @@ export interface RateLimitStatus {
   status?: string;
   /** Representative window reset, epoch ms (the binding window's reset). */
   resetAt?: number;
-  /** The rolling 5-hour subscription window. */
+  /** The rolling 5-hour subscription window (Anthropic). */
   fiveHour?: RateLimitWindow;
-  /** The rolling 7-day subscription window. */
+  /** The rolling 7-day window (Anthropic headers / SuperGrok weekly pool). */
   sevenDay?: RateLimitWindow;
   /** Requests-per-window counter (OpenAI-wire `x-ratelimit-*-requests`). */
   requests?: RateLimitCounter;

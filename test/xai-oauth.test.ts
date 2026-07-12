@@ -257,3 +257,101 @@ test("non-streaming requests carry no stream_options", async () => {
   const body = JSON.parse(calls[0]!.body) as Record<string, unknown>;
   assert.equal(body.stream_options, undefined);
 });
+
+test("subscriptionUsage: format=credits maps weekly pool into rateLimit.sevenDay", async () => {
+  const calls: Call[] = [];
+  const creditsBody = {
+    config: {
+      currentPeriod: {
+        type: "USAGE_PERIOD_TYPE_WEEKLY",
+        start: "2026-07-08T00:00:00+00:00",
+        end: "2026-07-15T00:00:00+00:00",
+      },
+      creditUsagePercent: 31,
+      productUsage: [
+        { product: "GrokBuild", usagePercent: 31 },
+        { product: "GrokChat" },
+      ],
+      isUnifiedBillingUser: true,
+      prepaidBalance: { val: 0 },
+      onDemandCap: { val: 0 },
+      onDemandUsed: { val: 0 },
+      billingPeriodStart: "2026-07-08T00:00:00+00:00",
+      billingPeriodEnd: "2026-07-15T00:00:00+00:00",
+    },
+  };
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: async (input, init) => {
+      const url = String(input);
+      const headers: Record<string, string> = {};
+      new Headers(init?.headers).forEach((v, k) => (headers[k] = v));
+      calls.push({ url, headers, body: String(init?.body ?? "") });
+      if (url.includes("/v1/billing")) {
+        return new Response(JSON.stringify(creditsBody), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return chatResponse();
+    },
+  });
+
+  const usage = await provider.subscriptionUsage();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0]!.url, /\/v1\/billing\?format=credits$/);
+  assert.equal(calls[0]!.headers["authorization"], "Bearer AT");
+  assert.equal(usage.percent, 31);
+  assert.equal(usage.utilization, 0.31);
+  assert.equal(usage.periodType, "USAGE_PERIOD_TYPE_WEEKLY");
+  assert.equal(usage.periodStart, Date.parse("2026-07-08T00:00:00+00:00"));
+  assert.equal(usage.periodEnd, Date.parse("2026-07-15T00:00:00+00:00"));
+  assert.equal(usage.products.length, 2);
+  assert.equal(usage.products[0]!.product, "GrokBuild");
+  assert.equal(usage.products[0]!.usagePercent, 31);
+  assert.equal(usage.isUnified, true);
+
+  assert.equal(usage.rateLimit.representative, "seven_day");
+  assert.equal(usage.rateLimit.sevenDay?.utilization, 0.31);
+  assert.equal(usage.rateLimit.sevenDay?.status, "allowed");
+  assert.equal(usage.rateLimit.resetAt, usage.periodEnd);
+  // Cached for pool / Provider.rateLimit readers
+  assert.equal(provider.rateLimit?.sevenDay?.utilization, 0.31);
+});
+
+test("subscriptionUsage: high utilization marks allowed_warning / rejected", async () => {
+  const mk = (percent: number) =>
+    new XAIOAuthProvider({
+      credentials: { accessToken: "AT" },
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            config: {
+              currentPeriod: {
+                type: "USAGE_PERIOD_TYPE_WEEKLY",
+                start: "2026-07-08T00:00:00+00:00",
+                end: "2026-07-15T00:00:00+00:00",
+              },
+              creditUsagePercent: percent,
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    });
+
+  const warn = await mk(95).subscriptionUsage();
+  assert.equal(warn.rateLimit.status, "allowed_warning");
+  const rej = await mk(100).subscriptionUsage();
+  assert.equal(rej.rateLimit.status, "rejected");
+});
+
+test("subscriptionUsage: HTTP errors become CardanError", async () => {
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: async () => new Response("nope", { status: 503 }),
+  });
+  await assert.rejects(
+    provider.subscriptionUsage(),
+    (err: Error) => /subscription usage.*503/i.test(err.message),
+  );
+});

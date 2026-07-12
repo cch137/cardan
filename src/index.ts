@@ -148,6 +148,7 @@ export {
   GROK_AUTH_SCOPE,
   type XAIOAuthCredentials,
   type XAIOAuthProviderOptions,
+  type XAISubscriptionUsage,
 } from "./providers/xai-oauth.js";
 export {
   PoolProvider,

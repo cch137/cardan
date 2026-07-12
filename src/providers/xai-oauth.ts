@@ -1,5 +1,10 @@
-import { CardanError, wrapFetchError } from "../errors.js";
-import type { GenerateOptions, Provider, RetryOptions } from "../types.js";
+import { CardanError, codeFromStatus, wrapFetchError } from "../errors.js";
+import type {
+  GenerateOptions,
+  Provider,
+  RateLimitStatus,
+  RetryOptions,
+} from "../types.js";
 import { GroqProvider } from "./groq.js";
 
 /**
@@ -63,6 +68,55 @@ const EXPIRY_BUFFER_MS = 5 * 60 * 1000;
  */
 export const GROK_AUTH_SCOPE =
   "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
+
+/**
+ * SuperGrok **weekly** usage pool (shared across Chat / Build / Imagine / …),
+ * from `GET /v1/billing?format=credits` — what the CLI's `/usage show` reads.
+ *
+ * Distinct from bare `GET /v1/billing` (monthly credit ledger) and from
+ * per-response `x-ratelimit-*` throttle counters.
+ */
+export interface XAISubscriptionUsage {
+  /** Fraction of the weekly pool consumed, 0..1. */
+  utilization: number;
+  /** Same as utilization × 100 (`creditUsagePercent`). */
+  percent: number;
+  /** Period kind from the API, e.g. `USAGE_PERIOD_TYPE_WEEKLY`. */
+  periodType: string;
+  /** Current period start, epoch ms. */
+  periodStart?: number;
+  /** Current period end (reset time), epoch ms. */
+  periodEnd?: number;
+  /** Per-product share of the pool (percent 0..100 when reported). */
+  products: Array<{ product: string; usagePercent?: number }>;
+  /** Extra Usage Credits balance (prepaid), credits. */
+  prepaidBalance: number;
+  /** On-demand overage cap; `0` = disabled. */
+  onDemandCap: number;
+  /** On-demand credits used this period. */
+  onDemandUsed: number;
+  /** Unified billing user (shared weekly pool across products). */
+  isUnified: boolean;
+  /**
+   * Same snapshot as {@link RateLimitStatus} for pool / ops observability —
+   * populates `sevenDay` (+ representative/status/resetAt).
+   */
+  rateLimit: RateLimitStatus;
+  /** Raw `config` object from the response, for forward-compat. */
+  raw: unknown;
+}
+
+interface CreditsBillingConfig {
+  currentPeriod?: { type?: string; start?: string; end?: string };
+  creditUsagePercent?: number;
+  productUsage?: Array<{ product?: string; usagePercent?: number }>;
+  prepaidBalance?: { val?: number };
+  onDemandCap?: { val?: number };
+  onDemandUsed?: { val?: number };
+  isUnifiedBillingUser?: boolean;
+  billingPeriodStart?: string;
+  billingPeriodEnd?: string;
+}
 
 /** A Grok CLI OAuth credential set, as stored in `~/.grok/auth.json`. */
 export interface XAIOAuthCredentials {
@@ -278,22 +332,86 @@ function modelFromBody(body: unknown): string | undefined {
  * Grok CLI subscription provider. Speaks Chat Completions against the CLI chat
  * proxy with the `grok login` OAuth token. Pass standard xAI model ids
  * (e.g. `grok-4.5`); the proxy also accepts the CLI's own `grok-build`.
+ *
+ * Quota: call {@link subscriptionUsage} (or rely on ops refresh) to load the
+ * weekly SuperGrok pool into {@link rateLimit}.`sevenDay` — same shape pool
+ * members and Anthropic OAuth already expose for observability.
  */
 export class XAIOAuthProvider extends GroqProvider {
   override readonly name: string = "xai-oauth";
+  private readonly proxyBase: string;
+  private readonly authedFetch: typeof globalThis.fetch;
+  /** Last weekly-pool snapshot, merged into {@link rateLimit}. */
+  private lastSubscriptionLimit?: RateLimitStatus;
 
   constructor(options: XAIOAuthProviderOptions) {
+    const base = options.baseUrl ?? DEFAULT_PROXY_BASE;
     const auth = new GrokOAuth(options, options.fetch ?? globalThis.fetch);
+    const authedFetch = auth.wrapFetch(options.fetch ?? globalThis.fetch);
     super({
-      baseUrl: options.baseUrl ?? DEFAULT_PROXY_BASE,
+      baseUrl: base,
       // Placeholder: the wrapped fetch always overrides the Authorization
       // header, so GroqProvider's own api-key check never sends this value.
       apiKey: "oauth",
       headers: options.headers,
-      fetch: auth.wrapFetch(options.fetch ?? globalThis.fetch),
+      fetch: authedFetch,
       retry: options.retry,
       timeoutMs: options.timeoutMs,
     });
+    this.proxyBase = base;
+    this.authedFetch = authedFetch;
+  }
+
+  /**
+   * Weekly subscription pool + last-seen `x-ratelimit-*` throttle counters.
+   * Pool / ops read this via {@link Provider.rateLimit} and
+   * {@link PoolProvider.rateLimits}.
+   */
+  override get rateLimit(): RateLimitStatus | undefined {
+    const throttle = super.rateLimit;
+    const sub = this.lastSubscriptionLimit;
+    if (!sub && !throttle) return undefined;
+    if (!sub) return throttle;
+    if (!throttle) return sub;
+    return {
+      ...throttle,
+      ...sub,
+      requests: throttle.requests,
+      tokens: throttle.tokens,
+      sevenDay: sub.sevenDay,
+      representative: sub.representative ?? throttle.representative,
+      status: sub.status ?? throttle.status,
+      resetAt: sub.resetAt ?? throttle.resetAt,
+    };
+  }
+
+  /**
+   * Fetch the SuperGrok weekly usage pool (`GET /v1/billing?format=credits`)
+   * and cache it on {@link rateLimit}. Safe to call from ops / admin; not
+   * required on every chat turn.
+   */
+  async subscriptionUsage(): Promise<XAISubscriptionUsage> {
+    let res: Response;
+    try {
+      res = await this.authedFetch(
+        `${this.proxyBase}/v1/billing?format=credits`,
+        { method: "GET" },
+      );
+    } catch (error) {
+      throw wrapFetchError(error, this.name);
+    }
+    if (!res.ok) {
+      throw new CardanError(
+        codeFromStatus(res.status),
+        `xai subscription usage: HTTP ${res.status}`,
+        { provider: this.name, status: res.status },
+      );
+    }
+    const body = (await res.json()) as { config?: CreditsBillingConfig };
+    const config = body?.config ?? {};
+    const usage = parseCreditsConfig(config);
+    this.lastSubscriptionLimit = usage.rateLimit;
+    return usage;
   }
 
   /**
@@ -312,6 +430,87 @@ export class XAIOAuthProvider extends GroqProvider {
     }
     return body;
   }
+}
+
+function parseCreditsConfig(config: CreditsBillingConfig): XAISubscriptionUsage {
+  const percent = clampPercent(config.creditUsagePercent);
+  const utilization = percent / 100;
+  const periodType =
+    typeof config.currentPeriod?.type === "string"
+      ? config.currentPeriod.type
+      : "USAGE_PERIOD_TYPE_WEEKLY";
+  const periodStart =
+    dateMs(config.currentPeriod?.start) ?? dateMs(config.billingPeriodStart);
+  const periodEnd =
+    dateMs(config.currentPeriod?.end) ?? dateMs(config.billingPeriodEnd);
+  const status =
+    utilization >= 1
+      ? "rejected"
+      : utilization >= 0.9
+        ? "allowed_warning"
+        : "allowed";
+
+  const rateLimit: RateLimitStatus = {
+    representative: "seven_day",
+    status,
+    sevenDay: {
+      utilization,
+      resetAt: periodEnd ?? 0,
+      status,
+    },
+  };
+  if (periodEnd !== undefined) {
+    rateLimit.resetAt = periodEnd;
+    rateLimit.sevenDay = {
+      utilization,
+      resetAt: periodEnd,
+      status,
+    };
+  } else {
+    // No reset time: still expose utilization without a fake epoch.
+    rateLimit.sevenDay = { utilization, resetAt: 0, status };
+  }
+
+  const products = (config.productUsage ?? [])
+    .filter((p): p is { product: string; usagePercent?: number } =>
+      typeof p?.product === "string"
+    )
+    .map((p) => ({
+      product: p.product,
+      ...(typeof p.usagePercent === "number"
+        ? { usagePercent: clampPercent(p.usagePercent) }
+        : {}),
+    }));
+
+  return {
+    utilization,
+    percent,
+    periodType,
+    ...(periodStart !== undefined ? { periodStart } : {}),
+    ...(periodEnd !== undefined ? { periodEnd } : {}),
+    products,
+    prepaidBalance: numVal(config.prepaidBalance),
+    onDemandCap: numVal(config.onDemandCap),
+    onDemandUsed: numVal(config.onDemandUsed),
+    isUnified: config.isUnifiedBillingUser === true,
+    rateLimit,
+    raw: config,
+  };
+}
+
+function clampPercent(n: unknown): number {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  return Math.min(100, Math.max(0, n));
+}
+
+function numVal(x: { val?: number } | undefined): number {
+  return typeof x?.val === "number" && Number.isFinite(x.val) ? x.val : 0;
+}
+
+function dateMs(s: string | undefined): number | undefined {
+  if (!s) return undefined;
+  const ms = Date.parse(s);
+  return Number.isNaN(ms) ? undefined : ms;
 }
 
 /** Convenience factory mirroring the other cardan provider constructors. */
