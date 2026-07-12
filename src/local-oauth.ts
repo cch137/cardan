@@ -12,11 +12,12 @@
  */
 import {
   detectAll,
+  PROVIDERS,
   type DetectedCredential,
   type DetectIO,
   type ProviderSpec,
 } from "./detect.js";
-import { readEnv } from "./env.js";
+import { expandEnvFamily, readEnv } from "./env.js";
 import { CardanError } from "./errors.js";
 import {
   AnthropicProvider,
@@ -83,11 +84,51 @@ export interface LoadLocalOAuthOptions {
    */
   tokens?: LocalOAuthTokenInput[];
   /**
-   * Environment variable names to read as bare tokens. Each set var becomes a
-   * member; prefix is inferred from the name (`CLAUDE_CODE_*` → anthropic,
-   * `GROK_BUILD_*` → xai). Explicit {@link tokens} are applied after these.
+   * Bare env tokens to merge (no refresh). Each **base** name expands to every
+   * set sibling in the process env: `BASE`, `BASE1`, `BASE2`, … `BASE10`, …
+   * (see {@link expandEnvFamily}). Prefix is inferred from the name
+   * (`CLAUDE_CODE_*` → anthropic, `GROK_BUILD_*` → xai).
+   *
+   * - `true` (default): use each loaded prefix's standard base
+   *   (`CLAUDE_CODE_OAUTH_TOKEN` / `GROK_BUILD_OAUTH_TOKEN`).
+   * - `false`: do not read env tokens.
+   * - `string` / `string[]`: treat each entry as a base family name.
    */
-  env?: string[];
+  env?: boolean | string | string[];
+}
+
+/** Default env base names for the given local-oauth prefixes. */
+function defaultEnvBases(prefixes: ReadonlySet<LocalOAuthPrefix>): string[] {
+  const bases: string[] = [];
+  for (const spec of PROVIDERS) {
+    const prefix = prefixForSpec(spec);
+    if (prefix && prefixes.has(prefix)) bases.push(spec.envVar);
+  }
+  return bases;
+}
+
+/** Resolve {@link LoadLocalOAuthOptions.env} into concrete env var names. */
+function resolveEnvNames(
+  env: boolean | string | string[] | undefined,
+  prefixes: ReadonlySet<LocalOAuthPrefix>,
+): string[] {
+  if (env === false) return [];
+  const bases =
+    env === undefined || env === true
+      ? defaultEnvBases(prefixes)
+      : typeof env === "string"
+      ? [env]
+      : env;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const base of bases) {
+    for (const name of expandEnvFamily(base)) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push(name);
+    }
+  }
+  return out;
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
@@ -388,7 +429,7 @@ export async function loadLocalOAuth(
     }
   }
 
-  for (const name of options.env ?? []) {
+  for (const name of resolveEnvNames(options.env, want)) {
     const token = readEnv(name)?.trim();
     if (!token) continue;
     const prefix = prefixForEnvName(name);

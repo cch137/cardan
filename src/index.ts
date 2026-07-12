@@ -124,6 +124,7 @@ export {
   type LocalOAuthPrefix,
   type LocalOAuthTokenInput,
 } from "./local-oauth.js";
+export { expandEnvFamily, listEnvNames, readEnv } from "./env.js";
 export { normalizeMessages } from "./normalize.js";
 export { collectStream, collectStreamToMessage } from "./stream.js";
 export {

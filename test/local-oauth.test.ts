@@ -116,6 +116,7 @@ test("loadLocalOAuth: file members are refreshable and labeled", async () => {
   const members = await loadLocalOAuth({
     home: "/home/u",
     io,
+    env: false, // isolate from host env
   });
   assert.equal(members.length, 2);
 
@@ -163,6 +164,7 @@ test("loadLocalOAuth: distinct env tokens become extra members", async () => {
     home: "/home/u",
     io,
     prefixes: ["xai"],
+    env: false,
     tokens: [
       { prefix: "xai", accessToken: "other-token", label: "extra" },
     ],
@@ -182,6 +184,7 @@ test("loadLocalOAuth: files:false skips credential files", async () => {
     io,
     files: false,
     prefixes: ["xai"],
+    env: false,
     tokens: [{ prefix: "xai", accessToken: "env-only", label: "env" }],
   });
   assert.equal(members.length, 1);
@@ -190,16 +193,91 @@ test("loadLocalOAuth: files:false skips credential files", async () => {
   assert.equal(members[0]!.path, undefined);
 });
 
+test("loadLocalOAuth: env family expands BASE / BASE1 / BASE2 / BASE10", async () => {
+  const keys = [
+    "GROK_BUILD_OAUTH_TOKEN",
+    "GROK_BUILD_OAUTH_TOKEN1",
+    "GROK_BUILD_OAUTH_TOKEN2",
+    "GROK_BUILD_OAUTH_TOKEN10",
+    "GROK_BUILD_OAUTH_TOKEN_OTHER", // must not match
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+  for (const k of keys) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  process.env.GROK_BUILD_OAUTH_TOKEN2 = "tok-2";
+  process.env.GROK_BUILD_OAUTH_TOKEN10 = "tok-10";
+  process.env.GROK_BUILD_OAUTH_TOKEN1 = "tok-1";
+  process.env.GROK_BUILD_OAUTH_TOKEN = "tok-bare";
+  process.env.GROK_BUILD_OAUTH_TOKEN_OTHER = "tok-other";
+  try {
+    const members = await loadLocalOAuth({
+      home: "/home/empty",
+      io: memoryIO({}),
+      files: false,
+      prefixes: ["xai"],
+      // default env:true → GROK_BUILD_OAUTH_TOKEN family
+    });
+    assert.deepEqual(
+      members.map((m) => m.label),
+      [
+        "GROK_BUILD_OAUTH_TOKEN",
+        "GROK_BUILD_OAUTH_TOKEN1",
+        "GROK_BUILD_OAUTH_TOKEN2",
+        "GROK_BUILD_OAUTH_TOKEN10",
+      ],
+    );
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
+
+test("expandEnvFamily: bare first, then numeric order; ignores non-suffix", async () => {
+  const { expandEnvFamily } = await import("../src/env.js");
+  const base = "CARDAN_TEST_ENV_FAM";
+  const keys = [`${base}`, `${base}1`, `${base}2`, `${base}10`, `${base}_X`, `${base}BAR`];
+  const saved: Record<string, string | undefined> = {};
+  for (const k of keys) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  process.env[`${base}10`] = "c";
+  process.env[`${base}2`] = "d";
+  process.env[`${base}`] = "a";
+  process.env[`${base}1`] = "b";
+  process.env[`${base}_X`] = "no";
+  process.env[`${base}BAR`] = "no";
+  try {
+    assert.deepEqual(expandEnvFamily(base), [
+      base,
+      `${base}1`,
+      `${base}2`,
+      `${base}10`,
+    ]);
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
+
 test("localOAuthPool: empty → undefined; non-empty → pool", async () => {
   const empty = await localOAuthPool("xai", {
     home: "/home/empty",
     io: memoryIO({}),
+    env: false,
   });
   assert.equal(empty, undefined);
 
   const pool = await localOAuthPool("xai", {
     home: "/home/u",
     io: memoryIO({ "/home/u/.grok/auth.json": grokFile }),
+    env: false,
   });
   assert.ok(pool);
   assert.equal(pool.name, "xai-oauth");

@@ -52,22 +52,22 @@ Programmatically, `detectCredentials()` and `detectAllUsers()` return the same d
 ```ts
 import { createCardan, localOAuthPool, loadLocalOAuthPrefix } from "cardan";
 
-// One-liner pool (files + env), or undefined when nothing found
+// Env families auto-expand: BASE, BASE1, BASE2, … BASE10 — set as many as you need.
+// Default `env: true` uses CLAUDE_CODE_OAUTH_TOKEN / GROK_BUILD_OAUTH_TOKEN as bases.
 const anthropic = await localOAuthPool("anthropic", {
-  files: false, // setup-token only
-  env: ["CLAUDE_CODE_OAUTH_TOKEN1", "CLAUDE_CODE_OAUTH_TOKEN2"],
+  files: false, // setup-token env only (not ~/.claude login session)
 });
 
-const xaiMembers = await loadLocalOAuthPrefix("xai", {
-  env: ["GROK_BUILD_OAUTH_TOKEN"], // deduped if same as ~/.grok/auth.json
-});
+const xaiMembers = await loadLocalOAuthPrefix("xai"); // file + env family, file wins on dedupe
 // xaiMembers[i].provider is XAIOAuthProvider (subscriptionUsage, …)
 
 const cardan = createCardan({
   providers: {
     ...(anthropic ? { anthropic } : {}),
     ...(xaiMembers.length
-      ? { xai: await localOAuthPool("xai", { env: ["GROK_BUILD_OAUTH_TOKEN"] }) }
+      ? {
+          xai: await localOAuthPool("xai"), // or createPool from xaiMembers
+        }
       : {}),
   },
 });
