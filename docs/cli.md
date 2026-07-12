@@ -1,6 +1,6 @@
 # CLI — `cardan detect`
 
-`package.json` 的 `bin: { "cardan": "./dist/cli.js" }` 讓使用者零設定即可 `npx cardan detect`(或全域安裝後 `cardan detect`)。對外使用說明見 [../README.md](../README.md#cli);本文記錄內部設計決策。
+`package.json` 的 `bin: { "cardan": "./dist/cli.js" }` 讓使用者零設定即可 `npx cardan@latest detect`(或全域安裝後 `cardan detect`)。對外使用說明見 [../README.md](../README.md#cli);本文記錄內部設計決策。
 
 ## 分層(資料 vs 呈現)
 
@@ -40,5 +40,12 @@ detect 完全離線、純讀。兩家的 refresh token 都是旋轉式(用一次
 ## 輸出契約
 
 偵測**只看憑證檔案,與環境變數無關** —— env 有沒有設既不會觸發也不會抑制偵測。每個供應商一節(`file` / `subscription` 或 `account` / `access token` / `refresh token`),結尾是可直接貼進 `.env` 的 block(env var 名對齊 cardan 執行時讀取的名字:`CLAUDE_CODE_OAUTH_TOKEN`、`GROK_BUILD_OAUTH_TOKEN`),過期 token 上方加 `#` 註解。找到任一憑證檔案 exit 0,否則 1。
+
+## env token 是短命且不可刷新的(貼上前須知)
+
+`.env` block 輸出的是 **access token**,而那兩個 env var 在 cardan 內被當作**不可刷新**的 bearer 直接送去推論 API,故到期即失效 —— **不能改放 refresh token**(refresh token 只在 OAuth token 端點有效,送去推論 API 會 401;且 env 在 runtime 唯讀,無法持久化旋轉後的新 refresh token)。因此:
+
+- **未過期**的 token 在 env 行上方加註 `# access token expires <time>`;有耐久替代方案的供應商(Anthropic 的 `claude setup-token`)再附上 `durableHint`(`ProviderSpec.durableHint`)。此註解讓貼上者知道這把會在幾小時內死。
+- 想要**自動保鮮**應走 config 的 `oauth`/`xaiOAuth` 物件(帶 `refreshToken` + `onRefresh`,見 [../README.md](../README.md#behavior-notes)),而非 detect 的 env block —— detect 刻意 read-only,不是長跑服務的憑證來源。
 
 **安全**:輸出含明文 access token,stdout 應視為機密 —— 別導進共享 log/CI,`--all-users`(尤其以 root 執行)會印出其他帳號的 token。這是刻意的產品行為(方便貼上),非疏漏。

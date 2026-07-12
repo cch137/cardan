@@ -49,6 +49,12 @@ export interface ProviderSpec {
   ownNames: readonly string[];
   /** Env var name used to label this provider's token in the `.env` output. */
   envVar: string;
+  /**
+   * How to obtain a long-lived token for durable env use, when the provider
+   * offers one (e.g. `claude setup-token`). Shown next to a short-lived token's
+   * expiry in the `.env` block. Omit when there is no durable-token path.
+   */
+  durableHint?: string;
   /** Pulls a credential out of parsed JSON, or undefined if shape mismatch. */
   extract(json: unknown): DetectedCredential | undefined;
 }
@@ -138,6 +144,7 @@ export const PROVIDERS: ProviderSpec[] = [
     dir: ".claude",
     ownNames: [".credentials.json"],
     envVar: "CLAUDE_CODE_OAUTH_TOKEN",
+    durableHint: "for a durable token run `claude setup-token`",
     extract: extractAnthropic,
   },
   {

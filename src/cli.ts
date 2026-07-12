@@ -79,6 +79,12 @@ export function renderDetections(
         envBlock.push(
           `# expired — run \`${d.spec.cliCommand}\` to refresh, then re-run detect`,
         );
+      } else if (d.cred.expiresAt !== undefined) {
+        // The env path sends this access token verbatim and never refreshes it
+        // (see docs/cli.md), so it goes stale at expiry. Flag when — and, when
+        // the provider has one, how to get a long-lived token instead.
+        const hint = d.spec.durableHint ? ` — ${d.spec.durableHint}` : "";
+        envBlock.push(`# access token expires ${fmtTime(d.cred.expiresAt)}${hint}`);
       }
       envBlock.push(`${d.spec.envVar}=${d.cred.accessToken}`);
     }
@@ -88,7 +94,7 @@ export function renderDetections(
   } else {
     lines.push("No credentials found.");
   }
-  return { text: lines.join("\n"), found: hasAnyCredential(detections) };
+  return { text: lines.join("\n") + "\n", found: hasAnyCredential(detections) };
 }
 
 /**

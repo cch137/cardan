@@ -166,9 +166,11 @@ test("renderDetections: full output with env block", () => {
       "  refresh token  present",
       "",
       "# .env — cardan reads these automatically",
+      "# access token expires 2026-07-12 13:00 UTC — for a durable token run `claude setup-token`",
       "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abc",
+      "# access token expires 2026-07-12 14:00 UTC",
       "GROK_BUILD_OAUTH_TOKEN=eyJ0.grok.token",
-    ].join("\n"),
+    ].join("\n") + "\n",
   );
 });
 
