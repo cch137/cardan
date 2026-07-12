@@ -7,6 +7,7 @@ import {
   type ErrorCode,
 } from "../errors.js";
 import { readEnv, warnOnce } from "../env.js";
+import { OAuthTokenManager } from "../oauth.js";
 import { normalizeMessages, partsToText, splitLeadingSystem } from "../normalize.js";
 import { parseSse } from "../sse.js";
 import { resolveRetry, resolveTimeout, withRetry, withTimeoutSignal } from "../retry.js";
@@ -152,78 +153,44 @@ const OAUTH_REFRESH_SCOPES = [
   "user:mcp_servers",
   "user:file_upload",
 ];
-const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
 /**
  * Manages a Claude.ai subscription OAuth credential for the Messages API.
  *
- * Token lifetime:
- * - The access token has a fixed lifetime (`expiresAt`, typically a few hours).
- *   Using it does not extend it.
- * - The refresh token mints new access tokens and itself rotates on every
- *   refresh — the previous one stops working, so the new credentials must be
- *   persisted (via `onRefresh`) or the next refresh fails.
- * - Tokens refresh proactively ~5 min before expiry; concurrent callers share a
- *   single refresh round-trip; a 401/403 forces one refresh + retry (covers a
- *   clock-skew or server-revoked token the local expiry check thought was fine).
+ * Lifecycle (proactive + single-flight refresh, on-401 fallback, rotation
+ * persistence, non-fatal persist failure) lives in {@link OAuthTokenManager};
+ * this subclass adds only the Claude Code identity block and the JSON token
+ * exchange. Token lifetime:
+ * - The access token has a fixed lifetime (`expiresAt`, typically a few hours);
+ *   using it does not extend it, so it is refreshed proactively before expiry.
+ * - The refresh token itself rotates on every refresh — the previous one stops
+ *   working, so the new credentials must be persisted (via `onRefresh`).
  * - Inference-only tokens (e.g. `claude setup-token`) carry no refresh token;
  *   they are long-lived and used as-is, surfacing an `auth` error once expired.
- *
- * Secrecy: the access token is only ever sent as `Authorization: Bearer` to the
- * Messages API; the refresh token only to the OAuth token endpoint. Neither is
- * placed in thrown errors.
  */
-class ClaudeOAuthAuth {
-  private creds: OAuthCredentials;
-  private inFlight: Promise<void> | null = null;
-
+class ClaudeOAuthAuth extends OAuthTokenManager<OAuthCredentials> {
   constructor(
     private readonly opts: AnthropicOAuthOptions,
-    private readonly fetchImpl: typeof globalThis.fetch,
+    fetchImpl: typeof globalThis.fetch,
   ) {
-    if (!opts.credentials?.accessToken) {
-      throw new CardanError("auth", "oauth.credentials.accessToken is required", {
-        provider: "anthropic",
-      });
-    }
-    this.creds = { ...opts.credentials };
+    super(
+      { provider: "anthropic", credentials: opts.credentials, onRefresh: opts.onRefresh },
+      fetchImpl,
+    );
   }
 
+  /** Subscription grant requires this as the first system block. */
   get identity(): string {
     return this.opts.identity ?? OAUTH_IDENTITY;
   }
 
-  get canRefresh(): boolean {
-    return Boolean(this.creds.refreshToken);
+  protected noRefreshMessage(): string {
+    return "cannot refresh OAuth token: no refresh token";
   }
 
-  private get expired(): boolean {
-    const e = this.creds.expiresAt;
-    return e != null && Date.now() + OAUTH_EXPIRY_BUFFER_MS >= e;
-  }
-
-  /** Valid access token, refreshing first if it is near expiry and refreshable. */
-  async accessToken(): Promise<string> {
-    if (this.expired && this.canRefresh) await this.refresh();
-    return this.creds.accessToken;
-  }
-
-  /** Force a refresh now; concurrent callers share one round-trip. */
-  refresh(): Promise<void> {
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.doRefresh().finally(() => {
-      this.inFlight = null;
-    });
-    return this.inFlight;
-  }
-
-  private async doRefresh(): Promise<void> {
-    const refreshToken = this.creds.refreshToken;
-    if (!refreshToken) {
-      throw new CardanError("auth", "cannot refresh OAuth token: no refresh token", {
-        provider: "anthropic",
-      });
-    }
+  protected async fetchRefreshedCredentials(
+    refreshToken: string,
+  ): Promise<Required<OAuthCredentials>> {
     let res: Response;
     try {
       res = await this.fetchImpl(this.opts.tokenUrl ?? OAUTH_TOKEN_URL, {
@@ -251,7 +218,7 @@ class ClaudeOAuthAuth {
       expires_in?: number;
       scope?: string;
     };
-    const next: Required<OAuthCredentials> = {
+    return {
       accessToken: data.access_token,
       refreshToken: data.refresh_token ?? refreshToken,
       expiresAt:
@@ -262,8 +229,6 @@ class ClaudeOAuthAuth {
         ? data.scope.split(" ").filter(Boolean)
         : (this.creds.scopes ?? []),
     };
-    this.creds = next;
-    await this.opts.onRefresh?.(next);
   }
 }
 
@@ -635,11 +600,16 @@ export class AnthropicProvider implements Provider {
     const url = `${this.options.baseUrl ?? DEFAULT_BASE_URL}${path}`;
     const payload = JSON.stringify(body);
     const { signal: composed, clear } = withTimeoutSignal(signal, timeoutMs);
+    // The bearer this attempt actually sent, captured so the on-401 refresh can
+    // skip a redundant rotation if a concurrent request already refreshed.
+    let tokenUsed: string | undefined;
     const send = async (): Promise<Response> => {
       try {
+        const headers = await this.requestHeaders();
+        tokenUsed = this.oauth?.currentAccessToken;
         return await this.fetch(url, {
           method: "POST",
-          headers: await this.requestHeaders(),
+          headers,
           body: payload,
           signal: composed ?? null,
         });
@@ -657,7 +627,7 @@ export class AnthropicProvider implements Provider {
         this.oauth?.canRefresh &&
         (response.status === 401 || response.status === 403)
       ) {
-        await this.oauth.refresh();
+        await this.oauth.refreshIfUnchanged(tokenUsed ?? this.oauth.currentAccessToken);
         response = await send();
       }
       if (!response.ok) {

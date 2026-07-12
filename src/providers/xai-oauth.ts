@@ -1,4 +1,5 @@
 import { CardanError, codeFromStatus, wrapFetchError } from "../errors.js";
+import { OAuthTokenManager } from "../oauth.js";
 import type {
   GenerateOptions,
   Provider,
@@ -58,8 +59,6 @@ const DEFAULT_CLIENT_VERSION = "0.2.93";
 /** The client surface the real CLI advertises; harmless constant. */
 const CLIENT_SURFACE_HEADER = "x-grok-client-surface";
 const DEFAULT_CLIENT_SURFACE = "grok-shell";
-/** Refresh this many ms before `expiresAt` to avoid clock-skew 401s. */
-const EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
 /**
  * The `~/.grok/auth.json` scope key under which `grok login` stores the OIDC
@@ -161,54 +160,30 @@ export interface XAIOAuthProviderOptions {
   timeoutMs?: number;
 }
 
-/** Manages the Grok OAuth credential: proactive + on-401 refresh, shared round-trips. */
-class GrokOAuth {
-  private creds: XAIOAuthCredentials;
-  private inFlight: Promise<void> | null = null;
-
+/**
+ * Manages the Grok OAuth credential. Lifecycle (proactive + single-flight
+ * refresh, on-401 fallback, rotation persistence, non-fatal persist failure)
+ * lives in {@link OAuthTokenManager}; this subclass adds only the form-encoded
+ * token exchange and the CLI-header-injecting {@link wrapFetch}.
+ */
+class GrokOAuth extends OAuthTokenManager<XAIOAuthCredentials> {
   constructor(
     private readonly opts: XAIOAuthProviderOptions,
-    private readonly fetchImpl: typeof globalThis.fetch,
+    fetchImpl: typeof globalThis.fetch,
   ) {
-    if (!opts.credentials?.accessToken) {
-      throw new CardanError("auth", "xai oauth: credentials.accessToken is required", {
-        provider: "xai-oauth",
-      });
-    }
-    this.creds = { ...opts.credentials };
+    super(
+      { provider: "xai-oauth", credentials: opts.credentials, onRefresh: opts.onRefresh },
+      fetchImpl,
+    );
   }
 
-  get canRefresh(): boolean {
-    return Boolean(this.creds.refreshToken);
+  protected noRefreshMessage(): string {
+    return "xai oauth: no refresh token; re-run `grok login`";
   }
 
-  private get expired(): boolean {
-    const e = this.creds.expiresAt;
-    return e != null && Date.now() + EXPIRY_BUFFER_MS >= e;
-  }
-
-  /** Valid access token, refreshing first if near expiry and refreshable. */
-  async accessToken(): Promise<string> {
-    if (this.expired && this.canRefresh) await this.refresh();
-    return this.creds.accessToken;
-  }
-
-  /** Force a refresh now; concurrent callers share one round-trip. */
-  refresh(): Promise<void> {
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.doRefresh().finally(() => {
-      this.inFlight = null;
-    });
-    return this.inFlight;
-  }
-
-  private async doRefresh(): Promise<void> {
-    const refreshToken = this.creds.refreshToken;
-    if (!refreshToken) {
-      throw new CardanError("auth", "xai oauth: no refresh token; re-run `grok login`", {
-        provider: "xai-oauth",
-      });
-    }
+  protected async fetchRefreshedCredentials(
+    refreshToken: string,
+  ): Promise<Required<XAIOAuthCredentials>> {
     let res: Response;
     try {
       // Standard OAuth2 token endpoint: form-encoded, unlike Anthropic's JSON.
@@ -243,23 +218,25 @@ class GrokOAuth {
         provider: "xai-oauth",
       });
     }
-    const next: Required<XAIOAuthCredentials> = {
+    return {
       accessToken,
       refreshToken: data.refresh_token ?? refreshToken,
       expiresAt:
         typeof data.expires_in === "number" ? Date.now() + data.expires_in * 1000 : null,
     };
-    this.creds = next;
-    await this.opts.onRefresh?.(next);
   }
 
-  /** A fetch that injects auth + CLI headers and refreshes once on a 401. */
+  /** A fetch that injects auth + CLI headers and refreshes once on a 401/403. */
   wrapFetch(base: typeof globalThis.fetch): typeof globalThis.fetch {
     const self = this;
     return async function authedFetch(input, init) {
+      // The bearer this attempt sent, so the on-401 refresh can skip a redundant
+      // rotation if a concurrent request already refreshed.
+      let tokenUsed = "";
       const send = async (): Promise<Response> => {
         const headers = new Headers(init?.headers);
-        headers.set("authorization", `Bearer ${await self.accessToken()}`);
+        tokenUsed = await self.accessToken();
+        headers.set("authorization", `Bearer ${tokenUsed}`);
         headers.set(TOKEN_AUTH_HEADER, TOKEN_AUTH_VALUE);
         headers.set(CLIENT_VERSION_HEADER, self.opts.clientVersion ?? DEFAULT_CLIENT_VERSION);
         headers.set(CLIENT_SURFACE_HEADER, self.opts.clientSurface ?? DEFAULT_CLIENT_SURFACE);
@@ -270,8 +247,8 @@ class GrokOAuth {
       let res = await send();
       // Access token rejected: refresh once and replay (proactive refresh only
       // fires when `expiresAt` is known, so tokens with unknown expiry land here).
-      if (res.status === 401 && self.canRefresh) {
-        await self.refresh();
+      if ((res.status === 401 || res.status === 403) && self.canRefresh) {
+        await self.refreshIfUnchanged(tokenUsed);
         res = await send();
       }
       // Surface proxy errors to the app layer: the proxy returns `{"error":

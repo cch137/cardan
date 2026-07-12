@@ -232,3 +232,84 @@ test("oauth mode: 401 triggers refresh + single retry, then recovers", async () 
   assert.equal(msgCalls.length, 2, "one failed + one retried");
   assert.equal((res.raw as { id: string }).id, "recovered");
 });
+
+test("oauth mode: a 403 also triggers refresh + retry", async () => {
+  const calls: Call[] = [];
+  const provider = new AnthropicProvider({
+    oauth: { credentials: { accessToken: "STALE", refreshToken: "RT", expiresAt: Date.now() + 3_600_000 } },
+    retry: false,
+    fetch: routedFetch({
+      calls,
+      onToken: () => tokenResponse({ access_token: "GOOD", expires_in: 3600 }),
+      onMessages: (call) =>
+        call.headers["authorization"] === "Bearer GOOD"
+          ? messageResponse(200, { ...MESSAGE_FIXTURE, id: "recovered" })
+          : messageResponse(403, { error: { message: "forbidden" } }),
+    }),
+  });
+  const res = await provider.generate({ model: "m", messages: [textMessage("user", "hi")] });
+  assert.equal(calls.filter((c) => c.url.includes("oauth/token")).length, 1, "403 refreshed once");
+  assert.equal((res.raw as { id: string }).id, "recovered");
+});
+
+test("oauth mode: overlapping 401s collapse into a single refresh", async () => {
+  const calls: Call[] = [];
+  const provider = new AnthropicProvider({
+    oauth: { credentials: { accessToken: "STALE", refreshToken: "RT", expiresAt: Date.now() + 3_600_000 } },
+    retry: false,
+    fetch: routedFetch({
+      calls,
+      onToken: () => tokenResponse({ access_token: "GOOD", expires_in: 3600 }),
+      onMessages: (call) =>
+        call.headers["authorization"] === "Bearer GOOD"
+          ? messageResponse()
+          : messageResponse(401, { error: { message: "stale" } }),
+    }),
+  });
+  // Both requests send STALE and get 401; refreshIfUnchanged means whichever
+  // reaches its 401 handler second either shares the in-flight refresh or, if
+  // the first already rotated, skips refreshing — exactly one token round-trip.
+  await Promise.all([
+    provider.generate({ model: "m", messages: [textMessage("user", "a")] }),
+    provider.generate({ model: "m", messages: [textMessage("user", "b")] }),
+  ]);
+  assert.equal(
+    calls.filter((c) => c.url.includes("oauth/token")).length,
+    1,
+    "two overlapping 401s triggered only one refresh",
+  );
+});
+
+test("oauth mode: a failing onRefresh warns but does not fail the request", async () => {
+  const calls: Call[] = [];
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+  try {
+    const provider = new AnthropicProvider({
+      oauth: {
+        // Expired -> proactive refresh; persistence then throws.
+        credentials: { accessToken: "AT", refreshToken: "RT", expiresAt: Date.now() - 1 },
+        onRefresh: () => {
+          throw new Error("disk full");
+        },
+      },
+      fetch: routedFetch({
+        calls,
+        onToken: () => tokenResponse({ access_token: "AT2", refresh_token: "RT2", expires_in: 3600 }),
+        onMessages: () => messageResponse(),
+      }),
+    });
+    // Must resolve despite the persistence failure.
+    await provider.generate({ model: "m", messages: [textMessage("user", "hi")] });
+    const msgCalls = calls.filter((c) => !c.url.includes("oauth/token"));
+    assert.equal(msgCalls.length, 1);
+    assert.equal(msgCalls[0]!.headers["authorization"], "Bearer AT2", "served with the fresh token");
+    assert.ok(
+      warnings.some((w) => /failed to persist refreshed credentials/.test(w)),
+      "persistence failure was surfaced as a warning",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+});
