@@ -74,17 +74,37 @@ const DEFAULT_BASE_URL = "https://api.openai.com";
 /** Models with the built-in web-search tool (gpt-5.x, gpt-4.1, gpt-4o families). */
 const WEB_SEARCH_MODELS = /^gpt-(?:5|4\.1|4o)/;
 
-/** OpenAI has no `max`; it tops out at `xhigh`. */
-const EFFORT_MAP: Record<ReasoningEffort, string> = {
-  low: "low",
-  medium: "medium",
-  high: "high",
-  xhigh: "xhigh",
-  max: "xhigh",
-};
-
 /** Reasoning efforts that auto-enable background mode (long generations). */
 const BACKGROUND_EFFORTS = new Set<ReasoningEffort>(["high", "xhigh", "max"]);
+
+/**
+ * o-series and Codex cannot disable reasoning (`effort: "none"` is rejected).
+ * GPT-5.1+ accepts `none`. Chat variants are non-reasoning and rarely hit this
+ * path; when they do, omit rather than send an invalid field.
+ */
+function supportsReasoningNone(model: string): boolean {
+  if (/^(o[0-9]|codex)/.test(model) || /codex/i.test(model)) return false;
+  // gpt-5.1+ (dateless minors like gpt-5.6-sol count as ≥ 5.1)
+  const m = model.match(/^gpt-5(?:\.(\d+))?/);
+  if (!m) return false;
+  return m[1] !== undefined && Number(m[1]) >= 1;
+}
+
+/**
+ * Map cardan effort onto the wire value this model accepts.
+ * - gpt-5.6*: full scale including distinct `max`
+ * - *codex*: low|medium|high|xhigh (`max` → `xhigh`)
+ * - o-series: low|medium|high (`xhigh`/`max` → `high`)
+ * - older gpt-5.x: top out at `xhigh` (`max` → `xhigh`)
+ */
+function mapReasoningEffort(model: string, effort: ReasoningEffort): string {
+  if (/^gpt-5\.6/.test(model)) return effort;
+  if (/codex/i.test(model)) return effort === "max" ? "xhigh" : effort;
+  if (/^o[0-9]/.test(model)) {
+    return effort === "xhigh" || effort === "max" ? "high" : effort;
+  }
+  return effort === "max" ? "xhigh" : effort;
+}
 
 /** Delay between background poll/retrieve requests. */
 const BACKGROUND_POLL_MS = 1000;
@@ -125,8 +145,11 @@ export interface OpenAIResponseBody {
  * Capability notes:
  * - the Responses API has no stop-sequence parameter; `stopSequences` is
  *   ignored;
- * - `reasoning.enabled: false` maps to `effort: "none"`, which only
- *   `gpt-5.1`+ accepts — omit `reasoning` entirely for older models.
+ * - reasoning effort is mapped per model family (see
+ *   {@link convertReasoning}): gpt-5.6 accepts `max` as distinct from
+ *   `xhigh`; Codex tops at `xhigh`; o-series tops at `high`;
+ *   `enabled: false` → `effort: "none"` only on gpt-5.1+, otherwise the
+ *   `reasoning` field is omitted (o-series / Codex reject `none`).
  *
  * Providers with Responses-compatible APIs (xAI) subclass this adapter and
  * override the protected hooks (base URL, API key env var, sampling-param
@@ -384,7 +407,7 @@ export class OpenAIProvider implements Provider {
       };
     }
     if (options.reasoning) {
-      const reasoning = this.convertReasoning(options.reasoning);
+      const reasoning = this.convertReasoning(options.reasoning, options.model);
       if (reasoning) body.reasoning = reasoning;
     }
     if (this.resolveBackground(options)) {
@@ -498,15 +521,24 @@ export class OpenAIProvider implements Provider {
     return citations;
   }
 
-  /** Returning undefined omits the `reasoning` field from the request. */
+  /**
+   * Map generic reasoning options onto the Responses API `reasoning` object.
+   * Returning undefined omits the field. Per-model ceilings and the `none`
+   * switch live here so callers can use the full cardan effort scale.
+   */
   protected convertReasoning(
     reasoning: NonNullable<GenerateOptions["reasoning"]>,
+    model: string,
   ): Record<string, unknown> | undefined {
-    // `none` is only accepted by gpt-5.1+; older reasoning models cannot
-    // disable reasoning at all
-    if (reasoning.enabled === false) return { effort: "none" };
+    if (reasoning.enabled === false) {
+      // o-series / Codex reject `none`; omit rather than 400
+      if (!supportsReasoningNone(model)) return undefined;
+      return { effort: "none" };
+    }
     return {
-      ...(reasoning.effort ? { effort: EFFORT_MAP[reasoning.effort] } : {}),
+      ...(reasoning.effort
+        ? { effort: mapReasoningEffort(model, reasoning.effort) }
+        : {}),
       // summaries are the only visible thinking the Responses API exposes
       summary: "auto",
     };

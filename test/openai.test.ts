@@ -145,8 +145,51 @@ test("drops sampling params on reasoning models, keeps them on chat models", asy
   });
   assert.equal(captured[0]!.body.temperature, undefined);
   assert.equal(captured[0]!.body.top_p, undefined);
-  assert.deepEqual(captured[0]!.body.reasoning, { effort: "xhigh", summary: "auto" });
+  assert.deepEqual(captured[0]!.body.reasoning, { effort: "max", summary: "auto" });
   assert.equal(captured[1]!.body.temperature, 0.5);
+});
+
+test("maps reasoning effort per model family", async () => {
+  const captured: Captured[] = [];
+  const provider = new OpenAIProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
+  });
+  const generate = (
+    model: string,
+    reasoning: { enabled?: boolean; effort?: "max" | "xhigh" | "high" | "low" },
+  ) =>
+    provider.generate({
+      model,
+      messages: [textMessage("user", "q")],
+      reasoning,
+    });
+
+  // gpt-5.6: max and xhigh are distinct; none disables
+  await generate("gpt-5.6-sol", { effort: "max" });
+  await generate("gpt-5.6-terra", { effort: "xhigh" });
+  await generate("gpt-5.6-luna", { enabled: false });
+  // codex: max → xhigh; cannot disable (omit)
+  await generate("gpt-5.3-codex", { effort: "max" });
+  await generate("gpt-5.3-codex", { enabled: false });
+  // o-series: xhigh/max → high; cannot disable
+  await generate("o3", { effort: "max" });
+  await generate("o4-mini", { effort: "xhigh" });
+  await generate("o3", { enabled: false });
+  // older gpt-5.x: max → xhigh; none accepted on 5.1+
+  await generate("gpt-5.4", { effort: "max" });
+  await generate("gpt-5.4", { enabled: false });
+
+  assert.deepEqual(captured[0]!.body.reasoning, { effort: "max", summary: "auto" });
+  assert.deepEqual(captured[1]!.body.reasoning, { effort: "xhigh", summary: "auto" });
+  assert.deepEqual(captured[2]!.body.reasoning, { effort: "none" });
+  assert.deepEqual(captured[3]!.body.reasoning, { effort: "xhigh", summary: "auto" });
+  assert.equal(captured[4]!.body.reasoning, undefined);
+  assert.deepEqual(captured[5]!.body.reasoning, { effort: "high", summary: "auto" });
+  assert.deepEqual(captured[6]!.body.reasoning, { effort: "high", summary: "auto" });
+  assert.equal(captured[7]!.body.reasoning, undefined);
+  assert.deepEqual(captured[8]!.body.reasoning, { effort: "xhigh", summary: "auto" });
+  assert.deepEqual(captured[9]!.body.reasoning, { effort: "none" });
 });
 
 test("thinking parts without id or signature are not replayed", async () => {

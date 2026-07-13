@@ -38,7 +38,7 @@ export interface XAIProviderOptions {
   timeoutMs?: number;
 }
 
-/** xAI tops out at `high` (no `xhigh`); `none` disables reasoning. */
+/** xAI graded effort tops out at `high` (no `xhigh`/`max` on grok-4.5). */
 const EFFORT_MAP: Record<ReasoningEffort, string> = {
   low: "low",
   medium: "medium",
@@ -46,6 +46,13 @@ const EFFORT_MAP: Record<ReasoningEffort, string> = {
   xhigh: "high",
   max: "high",
 };
+
+/**
+ * Models that accept graded `reasoning.effort` (low/medium/high).
+ * grok-4.5+ and future 5.x lines; pre-4.5 fast SKUs and non-reasoning ids
+ * reject the parameter, so the field is omitted for them.
+ */
+const GRADED_REASONING_MODELS = /^grok-(?:4\.(?:[5-9]|\d{2,})|[5-9])/;
 
 /** Grok models with the server-side `web_search` tool (Live Search successor). */
 const WEB_SEARCH_MODELS = /^grok-(?:4|[5-9])/;
@@ -62,11 +69,12 @@ const MAX_SEARCH_DOMAINS = 5;
  * `messages` (override via `providerOptions`).
  *
  * Capability notes:
- * - `reasoning.effort` accepts `low`/`medium`/`high` (verified against
- *   grok-4.5); `none` is rejected (`reasoning_effort value none`), so reasoning
- *   cannot be disabled — the `reasoning` field is simply omitted instead.
- *   `xhigh`/`max` cap to `high`. No `summary` parameter is sent — xAI always
- *   returns detailed reasoning summaries for reasoning models.
+ * - `reasoning.effort` accepts `low`/`medium`/`high` on grok-4.5+ (verified
+ *   against grok-4.5); older/fast SKUs omit the field. `none` is rejected
+ *   (`reasoning_effort value none`), so reasoning cannot be disabled — the
+ *   `reasoning` field is simply omitted instead. `xhigh`/`max` cap to `high`.
+ *   No `summary` parameter is sent — xAI always returns detailed reasoning
+ *   summaries for reasoning models.
  * - grok models accept `temperature`/`top_p` even when reasoning.
  * - xAI offers no embeddings API; `embed` throws `invalid_request`.
  * - `background` is never sent: xAI's Responses API rejects it (`Argument not
@@ -96,7 +104,10 @@ export class XAIProvider extends OpenAIProvider {
 
   protected override convertReasoning(
     reasoning: NonNullable<GenerateOptions["reasoning"]>,
+    model: string,
   ): Record<string, unknown> | undefined {
+    // Pre-4.5 / non-graded SKUs reject reasoning.effort entirely.
+    if (!GRADED_REASONING_MODELS.test(model)) return undefined;
     // xAI reasoning models cannot disable reasoning (`effort: none` is
     // rejected), so omit the field entirely rather than try to turn it off.
     if (reasoning.enabled === false) return undefined;

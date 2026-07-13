@@ -348,7 +348,23 @@ const NO_SAMPLING_PARAMS = /^claude-(?:fable|mythos|sonnet|opus)-\d+(?:-\d+)?$/;
  * thinking instead. Verified against claude-haiku-4-5 (budget-only) vs
  * claude-sonnet-5 (adaptive). Newer families default to adaptive.
  */
-const ADAPTIVE_THINKING_MODELS = /^claude-(?:fable|sonnet-5|opus-4-[89])/;
+const ADAPTIVE_THINKING_MODELS =
+  /^claude-(?:fable|mythos|sonnet-5|opus-4-[89])/;
+
+/**
+ * Adaptive thinking is always on; `thinking: { type: "disabled" }` is rejected.
+ * Fable 5 / Mythos 5 / Mythos Preview — omit thinking config rather than send
+ * disabled (request still runs with adaptive on).
+ */
+const ALWAYS_THINKING_MODELS = /^claude-(?:fable|mythos)/;
+
+/**
+ * Adaptive is the default when `thinking` is omitted (Sonnet 5). Turning
+ * reasoning off requires an explicit `thinking: { type: "disabled" }`.
+ * Opus 4.8 is opt-in adaptive (omit = off), so disabled is unnecessary there
+ * but still accepted by the API.
+ */
+const DEFAULT_ADAPTIVE_ON = /^claude-sonnet-5/;
 
 /** effort → `budget_tokens` for the budget-based (non-adaptive) thinking path. */
 const THINKING_BUDGETS: Record<ReasoningEffort, number> = {
@@ -774,10 +790,26 @@ export class AnthropicProvider implements Provider {
       };
     }
     // reasoning is on unless explicitly disabled; `effort` implies enabled
-    if (options.reasoning && options.reasoning.enabled !== false) {
-      if (ADAPTIVE_THINKING_MODELS.test(options.model)) {
+    if (options.reasoning) {
+      if (options.reasoning.enabled === false) {
+        // Fable/Mythos reject disabled (always-on adaptive). Sonnet 5 defaults
+        // to adaptive when thinking is omitted, so it needs an explicit
+        // disabled. Other models accept disabled or treat omit as off.
+        if (!ALWAYS_THINKING_MODELS.test(options.model)) {
+          if (
+            DEFAULT_ADAPTIVE_ON.test(options.model) ||
+            !ADAPTIVE_THINKING_MODELS.test(options.model)
+          ) {
+            // sonnet-5 (default-on) and budget-path models: send disabled
+            body.thinking = { type: "disabled" };
+          }
+          // opus-4.8 adaptive is opt-in: omit leaves thinking off
+        }
+      } else if (ADAPTIVE_THINKING_MODELS.test(options.model)) {
         body.thinking = { type: "adaptive" };
-        if (options.reasoning.effort) outputConfig.effort = options.reasoning.effort;
+        if (options.reasoning.effort) {
+          outputConfig.effort = options.reasoning.effort;
+        }
       } else {
         // Older models reject adaptive thinking and the effort parameter; map
         // effort to a token budget and clamp within the response's max_tokens.

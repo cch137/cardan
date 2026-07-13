@@ -4,6 +4,12 @@
 
 ## Anthropic
 
+thinking / effort:
+
+- adaptive 模型(`fable`/`mythos`/`sonnet-5`/`opus-4-[89]`):`thinking: { type: "adaptive" }` + 可選 `output_config.effort`(原樣透傳 low…max)。
+- 舊線(haiku-4-5 等):`thinking: { type: "enabled", budget_tokens }` 由 effort 映射(low 2k … max 32k),不送 effort 參數。
+- `enabled: false`:**Sonnet 5** 預設 adaptive,必須送 `thinking: { type: "disabled" }`;**Fable/Mythos** 拒收 disabled(always-on),省略 thinking;Opus 4.8 adaptive 為 opt-in,省略即可;budget 路徑送 `disabled`。
+
 prompt caching(唯一需 client 標記的 provider):
 
 - **`cache` 旗標**:cardan 通用 `cache` 選項在 Anthropic 放兩個 `cache_control` breakpoint——**最後一個 system block**(快取 tools+system)與**最後一則訊息的最後一個 content block**(對話增量快取),共 2 個遠低於 4 上限。開快取時 system 強制改 block 陣列形式(API key 模式亦然)以掛 `cache_control`;OAuth 模式 breakpoint 落在 identity 之後的 systemText block。`cache: { ttl: "1h" }`→`{ type: "ephemeral", ttl: "1h" }`(寫入 2× 基礎 input 價、存活 1h),預設 5m(寫入 1.25×);讀取一律 0.1×。低於模型最小可快取長度(Opus 4.8 = 1024 tokens、Haiku 4.5 = 4096)會被靜默忽略、不報錯。`cache` 未設則行為與改動前**逐 byte 相同**(system 維持字串、無 `cache_control`)。
@@ -33,14 +39,14 @@ prompt caching(唯一需 client 標記的 provider):
 - 走 Responses API 且**預設 stateless**:每請求帶 `store: false` + `include: ["reasoning.encrypted_content"]`,多輪上下文由 `messages` 重放(`providerOptions` 可覆寫)。
 - Responses API 無 stop sequence 參數:忽略 `stopSequences`。
 - tools 一律送 `strict: false`(strict 模式要求子集 schema,會弄壞任意 schema);structured output(`text.format`)送 `strict: true`,schema 符合子集是呼叫方責任。
-- reasoning:effort `max`→`xhigh`(上限),`enabled: false`→`effort: "none"`(僅 gpt-5.1+;舊模型省略 `reasoning`);啟用帶 `summary: "auto"` 取得可見 thinking。
+- reasoning 按模型映射:`gpt-5.6*` 完整 scale(含獨立 `max`);`*codex*` 上限 `xhigh`(`max`→`xhigh`);o-series 上限 `high`(`xhigh`/`max`→`high`);舊 gpt-5.x `max`→`xhigh`。`enabled: false`→`effort: "none"`(僅 gpt-5.1+;o-series/Codex 省略 `reasoning`)。啟用帶 `summary: "auto"` 取得可見 thinking。
 - `function_call_output` 無 error 旗標:`isError` 的 tool_result 包成 `{"error": …}` JSON 字串。
 - prompt caching 全自動(無寫入成本、≥1024 tokens 自動生效),cardan `cache` 選項僅把 `cache.key`→`prompt_cache_key`(穩定 key 提高命中率,例如 conversation id);`ttl` 忽略。讀取折扣**逐模型不同**(gpt-5.x 0.1×、o3 0.25×、gpt-4o/o1 0.5×),`input_tokens_details.cached_tokens`→`cache_read`(已含在 `input.total`)。
 
 ## xAI
 
 - 走 Responses API(Chat Completions 已 legacy),與 OpenAI Responses 線上相容(`store: false` + `include`、`text.format`、function calling、相同 SSE):`XAIProvider` 繼承 `OpenAIProvider`,差異收斂在 protected hooks(baseUrl、`XAI_API_KEY`、採樣參數、reasoning 映射)。
-- reasoning effort 只接受 `none`/`low`/`medium`/`high`(`xhigh`/`max` 封頂 `high`;僅 grok-4.3+,舊模型省略 `reasoning`);不送 `summary`——xAI 對 reasoning 模型一律回 detailed summary。grok 模型(含 reasoning)保留 `temperature`/`top_p`。
+- reasoning effort 在 grok-4.5+ 接受 `low`/`medium`/`high`(`xhigh`/`max` 封頂 `high`;`none` 拒收故省略欄位無法關閉);pre-4.5/fast SKU 省略 `reasoning`。不送 `summary`——xAI 對 reasoning 模型一律回 detailed summary。grok 模型(含 reasoning)保留 `temperature`/`top_p`。
 - 無 embeddings:`embed` 報 `invalid_request`。
 - prompt caching 全自動;Responses API 同樣吃 `prompt_cache_key`,故 `cache.key` 經繼承的 OpenAI `buildRequestBody` 直接生效(免額外 header)。讀取折扣逐模型不同(grok-4.5 約 0.25×),`input_tokens_details.cached_tokens`→`cache_read`。
 

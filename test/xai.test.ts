@@ -144,20 +144,28 @@ test("maps reasoning effort to the xAI range, without summary", async () => {
     apiKey: "xai-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE)], captured),
   });
-  const generate = (reasoning: { enabled?: boolean; effort?: "max" | "medium" }) =>
+  const generate = (
+    model: string,
+    reasoning: { enabled?: boolean; effort?: "max" | "medium" },
+  ) =>
     provider.generate({
-      model: "grok-4.5",
+      model,
       messages: [textMessage("user", "q")],
       reasoning,
     });
-  await generate({ effort: "max" });
-  await generate({ enabled: false });
-  await generate({ enabled: true });
+  await generate("grok-4.5", { effort: "max" });
+  await generate("grok-4.5", { enabled: false });
+  await generate("grok-4.5", { enabled: true });
+  // pre-4.5 fast SKUs reject graded effort — omit entirely
+  await generate("grok-4-fast-reasoning", { effort: "medium" });
+  await generate("grok-code-fast-1", { effort: "max" });
   assert.deepEqual(captured[0]!.body.reasoning, { effort: "high" });
   // xAI rejects `effort: none`, so reasoning cannot be disabled: field omitted.
   assert.equal(captured[1]!.body.reasoning, undefined);
   // no effort requested → provider default; field omitted entirely
   assert.equal(captured[2]!.body.reasoning, undefined);
+  assert.equal(captured[3]!.body.reasoning, undefined);
+  assert.equal(captured[4]!.body.reasoning, undefined);
 });
 
 test("streams via the shared Responses parser", async () => {

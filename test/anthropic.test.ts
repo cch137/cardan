@@ -138,7 +138,7 @@ test("drops sampling params on models that reject them", async () => {
   }
 });
 
-test("reasoning: effort alone enables thinking; enabled:false disables", async () => {
+test("reasoning: effort alone enables thinking; enabled:false is per-model", async () => {
   const captured: Captured[] = [];
   const provider = new AnthropicProvider({
     apiKey: "sk-test",
@@ -152,7 +152,7 @@ test("reasoning: effort alone enables thinking; enabled:false disables", async (
   });
   assert.deepEqual(captured[0]!.body.thinking, { type: "adaptive" });
   assert.deepEqual(captured[0]!.body.output_config, { effort: "high" });
-  // enabled:false sends neither thinking nor an effort hint
+  // opus-4.8 adaptive is opt-in: omit leaves thinking off (no disabled needed)
   await provider.generate({
     model: "claude-opus-4-8",
     messages: [textMessage("user", "q")],
@@ -160,6 +160,20 @@ test("reasoning: effort alone enables thinking; enabled:false disables", async (
   });
   assert.equal(captured[1]!.body.thinking, undefined);
   assert.equal(captured[1]!.body.output_config, undefined);
+  // sonnet-5 defaults to adaptive when thinking is omitted — must send disabled
+  await provider.generate({
+    model: "claude-sonnet-5",
+    messages: [textMessage("user", "q")],
+    reasoning: { enabled: false },
+  });
+  assert.deepEqual(captured[2]!.body.thinking, { type: "disabled" });
+  // fable rejects disabled (always-on adaptive): omit rather than 400
+  await provider.generate({
+    model: "claude-fable-5",
+    messages: [textMessage("user", "q")],
+    reasoning: { enabled: false },
+  });
+  assert.equal(captured[3]!.body.thinking, undefined);
 });
 
 test("reasoning: non-adaptive models (haiku-4-5) get budget-based thinking, no effort", async () => {
@@ -192,13 +206,13 @@ test("reasoning: non-adaptive models (haiku-4-5) get budget-based thinking, no e
     budget_tokens: 8192,
   });
 
-  // enabled:false still sends no thinking on the budget path
+  // enabled:false on budget-path models sends explicit disabled
   await provider.generate({
     model: "claude-haiku-4-5",
     messages: [textMessage("user", "q")],
     reasoning: { enabled: false, effort: "high" },
   });
-  assert.equal(captured[2]!.body.thinking, undefined);
+  assert.deepEqual(captured[2]!.body.thinking, { type: "disabled" });
 });
 
 test("reasoning: budget clamps under a small maxOutputTokens", async () => {
