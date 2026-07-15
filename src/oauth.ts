@@ -23,6 +23,15 @@ export interface OAuthManagerOptions<C extends OAuthCredentialsBase> {
    * refresh token stops working once a new one is issued.
    */
   onRefresh?: (credentials: Required<C>) => void | Promise<void>;
+  /**
+   * Re-read credentials from the persistence layer (e.g. the CLI credential
+   * file) before a network refresh. When another process (the official CLI)
+   * has already rotated the tokens, the reloaded set is adopted without a
+   * token-endpoint round-trip — and without `onRefresh`, since it came from
+   * the persistence layer. Return `undefined` (or throw) to keep the held
+   * credentials.
+   */
+  reload?: () => C | undefined | Promise<C | undefined>;
   /** Override the proactive-refresh lead time (default 5 min). */
   expiryBufferMs?: number;
 }
@@ -40,6 +49,9 @@ export interface OAuthManagerOptions<C extends OAuthCredentialsBase> {
  * - {@link refreshIfUnchanged} is the on-401 fallback: it refreshes only if the
  *   held token still matches the one the failed request used, so overlapping
  *   401s don't each rotate the refresh token.
+ * - When a `reload` hook is configured, every refresh first re-reads the
+ *   persistence layer and adopts externally rotated credentials instead of
+ *   refreshing over the network (see {@link OAuthManagerOptions.reload}).
  * - A rotated credential set is adopted in memory before persistence; a failing
  *   `onRefresh` is surfaced as a warning but never aborts the request — the
  *   in-memory token is valid and the process can keep serving.
@@ -51,6 +63,7 @@ export abstract class OAuthTokenManager<C extends OAuthCredentialsBase> {
   private inFlight: Promise<void> | null = null;
   private readonly provider: string;
   private readonly onRefresh?: (credentials: Required<C>) => void | Promise<void>;
+  private readonly reload?: () => C | undefined | Promise<C | undefined>;
   private readonly expiryBufferMs: number;
 
   constructor(
@@ -66,6 +79,7 @@ export abstract class OAuthTokenManager<C extends OAuthCredentialsBase> {
     }
     this.provider = options.provider;
     this.onRefresh = options.onRefresh;
+    this.reload = options.reload;
     this.expiryBufferMs = options.expiryBufferMs ?? DEFAULT_OAUTH_EXPIRY_BUFFER_MS;
     this.creds = { ...options.credentials };
   }
@@ -111,6 +125,32 @@ export abstract class OAuthTokenManager<C extends OAuthCredentialsBase> {
   }
 
   private async doRefresh(): Promise<void> {
+    // Reload-first: another process (the official CLI) may have already
+    // rotated the tokens in the persistence layer. Adopting its credentials
+    // avoids refreshing with a rotated-out refresh token — the one permanent
+    // failure a long-running process cannot recover from on its own.
+    if (this.reload) {
+      let loaded: C | undefined;
+      try {
+        loaded = await this.reload();
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[cardan] ${this.provider} oauth: credential reload failed (${cause}); ` +
+            "continuing with the in-memory credentials",
+        );
+      }
+      if (
+        loaded?.accessToken &&
+        (loaded.accessToken !== this.creds.accessToken ||
+          loaded.refreshToken !== this.creds.refreshToken)
+      ) {
+        // From the persistence layer, so no onRefresh — nothing new to persist.
+        this.creds = { ...loaded };
+        // Someone else already refreshed: don't rotate again.
+        if (!this.expired) return;
+      }
+    }
     const refreshToken = this.creds.refreshToken;
     if (!refreshToken) {
       throw new CardanError("auth", this.noRefreshMessage(), { provider: this.provider });

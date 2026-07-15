@@ -12,6 +12,8 @@
  */
 import {
   detectAll,
+  extractAnthropic,
+  extractXAI,
   PROVIDERS,
   type DetectedCredential,
   type DetectIO,
@@ -251,18 +253,27 @@ export function persistLocalOAuth(
   io.writeFile(path, `${JSON.stringify(root, null, 2)}\n`);
 }
 
+/**
+ * The access token the credential file currently holds, shared between the
+ * write-back ({@link makeOnRefresh}) and reload ({@link makeReload}) closures
+ * of one file member: write-back matches the file entry by this token, and a
+ * reload that adopts an externally rotated credential must move it in step or
+ * the next write-back misses the entry and the rotation is lost.
+ */
+interface HeldToken {
+  accessToken: string;
+}
+
 function makeOnRefresh(
   path: string,
   prefix: LocalOAuthPrefix,
-  initialAccessToken: string,
+  held: HeldToken,
   io: LocalOAuthIO,
 ): (c: {
   accessToken: string;
   refreshToken: string | null;
   expiresAt: number | null;
 }) => void {
-  // Track the last persisted access token so subsequent refreshes still match.
-  const held = { accessToken: initialAccessToken };
   return (c) => {
     // Refresh always yields a refresh token string in practice; fall back to
     // empty only so a malformed response still fails at persist/match rather
@@ -283,6 +294,44 @@ function makeOnRefresh(
   };
 }
 
+/**
+ * Re-read the credential file (same shape-based extraction as detect) so
+ * {@link OAuthTokenManager} can adopt tokens rotated by the official CLI
+ * instead of refreshing with a rotated-out refresh token. Returns `undefined`
+ * on a missing/unparseable file — the in-memory credentials stay in effect.
+ */
+function makeReload(
+  path: string,
+  prefix: LocalOAuthPrefix,
+  held: HeldToken,
+  io: LocalOAuthIO,
+): () => {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt: number | null;
+} | undefined {
+  const extract = prefix === "anthropic" ? extractAnthropic : extractXAI;
+  return () => {
+    const raw = io.readFile(path);
+    if (raw === undefined) return undefined;
+    let json: unknown;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+    const cred = extract(json);
+    if (!cred) return undefined;
+    // The file entry now carries this token; keep write-back matching it.
+    held.accessToken = cred.accessToken;
+    return {
+      accessToken: cred.accessToken,
+      refreshToken: cred.refreshToken,
+      expiresAt: cred.expiresAt ?? null,
+    };
+  };
+}
+
 function memberFromFile(
   prefix: LocalOAuthPrefix,
   cred: DetectedCredential,
@@ -292,9 +341,11 @@ function memberFromFile(
 ): LocalOAuthMember {
   const label = labelFromCred(cred, labelFallback);
   const canRefresh = Boolean(cred.refreshToken);
+  const held: HeldToken = { accessToken: cred.accessToken };
   const onRefresh = canRefresh
-    ? makeOnRefresh(path, prefix, cred.accessToken, io)
+    ? makeOnRefresh(path, prefix, held, io)
     : undefined;
+  const reload = makeReload(path, prefix, held, io);
 
   if (prefix === "anthropic") {
     const credentials: OAuthCredentials = {
@@ -308,7 +359,7 @@ function memberFromFile(
       path,
       canRefresh,
       provider: new AnthropicProvider({
-        oauth: { credentials, onRefresh },
+        oauth: { credentials, onRefresh, reload },
       }),
     };
   }
@@ -326,6 +377,7 @@ function memberFromFile(
     provider: new XAIOAuthProvider({
       credentials,
       onRefresh,
+      reload,
     }),
   };
 }

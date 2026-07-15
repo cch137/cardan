@@ -136,6 +136,14 @@ export interface XAIOAuthProviderOptions {
    * a new one is issued.
    */
   onRefresh?: (credentials: Required<XAIOAuthCredentials>) => void | Promise<void>;
+  /**
+   * Re-read credentials from the persistence layer before a network refresh;
+   * externally rotated credentials are adopted without a token-endpoint call.
+   */
+  reload?: () =>
+    | XAIOAuthCredentials
+    | undefined
+    | Promise<XAIOAuthCredentials | undefined>;
   /** Override the OAuth token endpoint (default `accounts.x.ai/oauth2/token`). */
   tokenUrl?: string;
   /** Override the OAuth client id (default `grok-cli`). */
@@ -172,7 +180,12 @@ class GrokOAuth extends OAuthTokenManager<XAIOAuthCredentials> {
     fetchImpl: typeof globalThis.fetch,
   ) {
     super(
-      { provider: "xai-oauth", credentials: opts.credentials, onRefresh: opts.onRefresh },
+      {
+        provider: "xai-oauth",
+        credentials: opts.credentials,
+        onRefresh: opts.onRefresh,
+        reload: opts.reload,
+      },
       fetchImpl,
     );
   }
@@ -206,12 +219,22 @@ class GrokOAuth extends OAuthTokenManager<XAIOAuthCredentials> {
         { provider: "xai-oauth", status: res.status },
       );
     }
-    const data = (await res.json()) as {
+    let data: {
       access_token?: string;
       key?: string;
       refresh_token?: string;
       expires_in?: number;
     };
+    try {
+      data = (await res.json()) as typeof data;
+    } catch {
+      // accounts.x.ai intermittently serves an HTML challenge page with a 200.
+      throw new CardanError(
+        "server",
+        "xai oauth: token endpoint returned non-JSON response",
+        { provider: "xai-oauth", status: res.status },
+      );
+    }
     const accessToken = data.access_token ?? data.key;
     if (!accessToken) {
       throw new CardanError("auth", "xai oauth: refresh response had no access token", {

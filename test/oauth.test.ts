@@ -280,6 +280,79 @@ test("oauth mode: overlapping 401s collapse into a single refresh", async () => 
   );
 });
 
+test("oauth mode: reload adopting rotated credentials skips the token endpoint and onRefresh", async () => {
+  const calls: Call[] = [];
+  let refreshes = 0;
+  const provider = new AnthropicProvider({
+    oauth: {
+      credentials: { accessToken: "AT", refreshToken: "RT", expiresAt: Date.now() - 1 }, // expired
+      reload: () => ({
+        accessToken: "AT2",
+        refreshToken: "RT2",
+        expiresAt: Date.now() + 3_600_000,
+      }),
+      onRefresh: () => {
+        refreshes++;
+      },
+    },
+    fetch: routedFetch({ calls, onToken: () => tokenResponse({}), onMessages: () => messageResponse() }),
+  });
+  await provider.generate({ model: "m", messages: [textMessage("user", "hi")] });
+  assert.equal(calls.filter((c) => c.url.includes("oauth/token")).length, 0, "no network refresh");
+  assert.equal(refreshes, 0, "reloaded credentials are not re-persisted");
+  assert.equal(calls[0]!.headers["authorization"], "Bearer AT2");
+});
+
+test("oauth mode: reload returning unchanged credentials still refreshes over the network", async () => {
+  const calls: Call[] = [];
+  const expiresAt = Date.now() - 1;
+  const provider = new AnthropicProvider({
+    oauth: {
+      credentials: { accessToken: "AT", refreshToken: "RT", expiresAt },
+      reload: () => ({ accessToken: "AT", refreshToken: "RT", expiresAt }),
+    },
+    fetch: routedFetch({
+      calls,
+      onToken: () => tokenResponse({ access_token: "AT2", refresh_token: "RT2", expires_in: 3600 }),
+      onMessages: () => messageResponse(),
+    }),
+  });
+  await provider.generate({ model: "m", messages: [textMessage("user", "hi")] });
+  assert.equal(calls.filter((c) => c.url.includes("oauth/token")).length, 1);
+  const msgCalls = calls.filter((c) => !c.url.includes("oauth/token"));
+  assert.equal(msgCalls[0]!.headers["authorization"], "Bearer AT2");
+});
+
+test("oauth mode: a throwing reload warns and falls back to the network refresh", async () => {
+  const calls: Call[] = [];
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => void warnings.push(args.map(String).join(" "));
+  try {
+    const provider = new AnthropicProvider({
+      oauth: {
+        credentials: { accessToken: "AT", refreshToken: "RT", expiresAt: Date.now() - 1 },
+        reload: () => {
+          throw new Error("fs gone");
+        },
+      },
+      fetch: routedFetch({
+        calls,
+        onToken: () => tokenResponse({ access_token: "AT2", expires_in: 3600 }),
+        onMessages: () => messageResponse(),
+      }),
+    });
+    await provider.generate({ model: "m", messages: [textMessage("user", "hi")] });
+    assert.equal(calls.filter((c) => c.url.includes("oauth/token")).length, 1);
+    assert.ok(
+      warnings.some((w) => /credential reload failed/.test(w)),
+      "reload failure was surfaced as a warning",
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+});
+
 test("oauth mode: a failing onRefresh warns but does not fail the request", async () => {
   const calls: Call[] = [];
   const warnings: string[] = [];

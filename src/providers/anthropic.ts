@@ -72,6 +72,14 @@ export interface AnthropicOAuthOptions {
    * them — the previous refresh token stops working once a new one is issued.
    */
   onRefresh?: (credentials: Required<OAuthCredentials>) => void | Promise<void>;
+  /**
+   * Re-read credentials from the persistence layer before a network refresh;
+   * externally rotated credentials are adopted without a token-endpoint call.
+   */
+  reload?: () =>
+    | OAuthCredentials
+    | undefined
+    | Promise<OAuthCredentials | undefined>;
   /** Override the OAuth token endpoint. */
   tokenUrl?: string;
   /** Override the OAuth client id. */
@@ -174,7 +182,12 @@ class ClaudeOAuthAuth extends OAuthTokenManager<OAuthCredentials> {
     fetchImpl: typeof globalThis.fetch,
   ) {
     super(
-      { provider: "anthropic", credentials: opts.credentials, onRefresh: opts.onRefresh },
+      {
+        provider: "anthropic",
+        credentials: opts.credentials,
+        onRefresh: opts.onRefresh,
+        reload: opts.reload,
+      },
       fetchImpl,
     );
   }
@@ -212,12 +225,21 @@ class ClaudeOAuthAuth extends OAuthTokenManager<OAuthCredentials> {
         status: res.status,
       });
     }
-    const data = (await res.json()) as {
+    let data: {
       access_token: string;
       refresh_token?: string;
       expires_in?: number;
       scope?: string;
     };
+    try {
+      data = (await res.json()) as typeof data;
+    } catch {
+      throw new CardanError(
+        "server",
+        "anthropic oauth: token endpoint returned non-JSON response",
+        { provider: "anthropic", status: res.status },
+      );
+    }
     return {
       accessToken: data.access_token,
       refreshToken: data.refresh_token ?? refreshToken,

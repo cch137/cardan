@@ -132,6 +132,31 @@ test("proactive refresh when the access token is near expiry", async () => {
   assert.equal(calls[1]!.headers["authorization"], "Bearer NEW");
 });
 
+test("non-JSON token endpoint response fails as a retryable server error", async () => {
+  const { isCardanError } = await import("../src/errors.js");
+  const calls: Call[] = [];
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "OLD", refreshToken: "RT", expiresAt: Date.now() - 1 },
+    retry: false,
+    fetch: routedFetch({
+      calls,
+      // accounts.x.ai challenge page: HTML with a 200 status.
+      onToken: () => new Response("<html>challenge</html>", { status: 200 }),
+      onChat: () => chatResponse(),
+    }),
+  });
+  await assert.rejects(
+    provider.generate({ model: "grok-4.5", messages: [textMessage("user", "hi")] }),
+    (err: unknown) => {
+      assert.ok(isCardanError(err));
+      assert.equal(err.code, "server");
+      assert.match(err.message, /non-JSON/);
+      assert.ok(!err.message.includes("challenge"), "body content stays out of the error");
+      return true;
+    },
+  );
+});
+
 test("string-form proxy error reaches the app layer (426 version outdated)", async () => {
   const provider = new XAIOAuthProvider({
     credentials: { accessToken: "AT" },

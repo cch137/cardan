@@ -285,6 +285,81 @@ test("localOAuthPool: empty → undefined; non-empty → pool", async () => {
   assert.equal(pool.rateLimits()[0]!.label, "chee");
 });
 
+test("file member: adopts external rotation via reload; write-back still matches after", async () => {
+  const path = "/home/u/.grok/auth.json";
+  const io = memoryIO({
+    [path]: JSON.stringify({
+      [grokScope]: {
+        key: "old-token",
+        refresh_token: "old-refresh",
+        expires_at: new Date(Date.now() - 1000).toISOString(), // expired in memory
+      },
+    }),
+  });
+  const calls: Array<{ url: string; auth: string; body: string }> = [];
+  let rejectOnce = false;
+  const fetchStub: typeof globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    const auth = headers.get("authorization") ?? "";
+    calls.push({ url, auth, body: String(init?.body ?? "") });
+    if (url.includes("/oauth2/token")) {
+      return new Response(
+        JSON.stringify({ access_token: "net-new", refresh_token: "net-refresh", expires_in: 3600 }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (rejectOnce) {
+      rejectOnce = false;
+      return new Response(JSON.stringify({ error: { message: "expired" } }), { status: 401 });
+    }
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = fetchStub; // members are built on globalThis.fetch
+  try {
+    const members = await loadLocalOAuthPrefix("xai", { home: "/home/u", io, env: false });
+    assert.equal(members.length, 1);
+    const provider = members[0]!.provider;
+
+    // The CLI rotates the file after load: memory still holds old-token.
+    io.files[path] = JSON.stringify({
+      [grokScope]: {
+        key: "cli-new",
+        refresh_token: "cli-refresh",
+        expires_at: new Date(Date.now() + 7_200_000).toISOString(),
+      },
+    });
+
+    // Proactive refresh reloads the file and adopts — no token endpoint call.
+    const { textMessage } = await import("../src/index.js");
+    await provider.generate({ model: "grok-4.5", messages: [textMessage("user", "a")] });
+    assert.equal(calls.filter((c) => c.url.includes("/oauth2/token")).length, 0);
+    assert.equal(calls.at(-1)!.auth, "Bearer cli-new", "served with the CLI-rotated token");
+
+    // Next 401 goes to the network (file unchanged) using the reloaded refresh
+    // token; write-back must match the file entry (held synced by reload).
+    rejectOnce = true;
+    await provider.generate({ model: "grok-4.5", messages: [textMessage("user", "b")] });
+    const tokenCalls = calls.filter((c) => c.url.includes("/oauth2/token"));
+    assert.equal(tokenCalls.length, 1);
+    assert.equal(new URLSearchParams(tokenCalls[0]!.body).get("refresh_token"), "cli-refresh");
+    assert.equal(calls.at(-1)!.auth, "Bearer net-new");
+    const persisted = JSON.parse(io.files[path]!);
+    assert.equal(persisted[grokScope].key, "net-new", "write-back matched the rotated entry");
+    assert.equal(persisted[grokScope].refresh_token, "net-refresh");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 test("detect path is absolute", async () => {
   const { detectAll } = await import("../src/detect.js");
   const detections = detectAll({
