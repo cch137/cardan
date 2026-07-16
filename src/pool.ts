@@ -472,23 +472,30 @@ export class PoolProvider implements Provider {
     }
   }
 
-  /** Built when every member is cooling for `model` and the last-ditch try failed. */
+  /**
+   * Built when every member is cooling for `model` and the last-ditch try failed.
+   * Message is user-safe: no member labels (those may be internal env names).
+   */
   private allCoolingError(model: string): CardanError {
     let soonest: number | undefined;
-    let label = "";
     for (const member of this.members) {
       const until = this.coolingUntil(member.index, model);
       if (until !== undefined && (soonest === undefined || until < soonest)) {
         soonest = until;
-        label = member.label;
       }
     }
     const remaining = soonest === undefined ? undefined : Math.max(0, soonest - Date.now());
     const eta = remaining === undefined ? "unknown" : `${Math.ceil(remaining / 1000)}s`;
     return new CardanError(
       "rate_limit",
-      `pool(${this.name}): all ${this.members.length} members are cooling down for model "${model}"; soonest recovery in ${eta} (member "${label}")`,
-      { provider: this.name, retryAfterMs: remaining },
+      `all ${this.members.length} members are cooling down for model "${model}"; soonest recovery in ${eta}`,
+      {
+        provider: this.name,
+        retryAfterMs: remaining,
+        // Absolute reset when known so callers can surface a stable retry hint
+        // without parsing the relative message.
+        ...(soonest !== undefined && soonest > Date.now() ? { resetAt: soonest } : {}),
+      },
     );
   }
 

@@ -701,6 +701,27 @@ export class AnthropicProvider implements Provider {
     // request for the full Retry-After; mark non-retryable so the pool can
     // fail over immediately (or the caller can surface the error).
     const subscriptionQuota = code === "rate_limit" && resetAt !== undefined;
+    // Persist the unified rate-limit snapshot on error responses too — ops
+    // reads `provider.rateLimit` after a failed request. Without this, a
+    // subscription 429 cools the pool member but leaves the last *success*
+    // snapshot (often still "allowed"/"allowed_warning"), so dashboards never
+    // mark the account exhausted.
+    const rateLimit = parseRateLimit(response.headers);
+    if (rateLimit) {
+      if (
+        subscriptionQuota &&
+        rateLimit.status !== "rejected" &&
+        rateLimit.status !== "exhausted"
+      ) {
+        rateLimit.status = "exhausted";
+      }
+      this.lastRateLimit = rateLimit;
+    } else if (subscriptionQuota) {
+      this.lastRateLimit = {
+        status: "exhausted",
+        ...(resetAt !== undefined ? { resetAt } : {}),
+      };
+    }
     return new CardanError(code, message, {
       provider: this.name,
       status: response.status,

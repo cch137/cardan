@@ -123,6 +123,38 @@ test("oauth mode: a 429 surfaces the unified reset as resetAt", async () => {
   );
   // Only one attempt — did not sit on the 1h Retry-After.
   assert.equal(calls, 1);
+  // Ops reads provider.rateLimit after the failure; snapshot must reflect
+  // the exhausted subscription window, not stay undefined / stale-success.
+  assert.equal(provider.rateLimit?.status, "exhausted");
+  assert.equal(provider.rateLimit?.resetAt, resetEpoch * 1000);
+});
+
+test("oauth mode: a 429 with full unified headers overwrites lastRateLimit", async () => {
+  const resetEpoch = Math.floor(Date.now() / 1000) + 7200;
+  const headers = {
+    "content-type": "application/json",
+    "anthropic-ratelimit-unified-status": "rejected",
+    "anthropic-ratelimit-unified-representative-claim": "five_hour",
+    "anthropic-ratelimit-unified-reset": String(resetEpoch),
+    "anthropic-ratelimit-unified-5h-utilization": "1",
+    "anthropic-ratelimit-unified-5h-status": "rejected",
+    "anthropic-ratelimit-unified-5h-reset": String(resetEpoch),
+  };
+  const fetch429: typeof globalThis.fetch = async (input) => {
+    if (String(input).includes("oauth/token")) return tokenResponse({});
+    return new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+      status: 429,
+      headers,
+    });
+  };
+  const provider = new AnthropicProvider({ oauth: "AT", fetch: fetch429 });
+  await assert.rejects(
+    provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "hi")] }),
+  );
+  assert.equal(provider.rateLimit?.status, "rejected");
+  assert.equal(provider.rateLimit?.representative, "five_hour");
+  assert.equal(provider.rateLimit?.fiveHour?.status, "rejected");
+  assert.equal(provider.rateLimit?.resetAt, resetEpoch * 1000);
 });
 
 test("oauth mode: no api key required (does not throw)", async () => {

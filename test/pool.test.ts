@@ -145,14 +145,40 @@ test("pool: throws a clear error when all members are cooling", async () => {
   const b = new Fake();
   a.fail = () => rateLimit(300_000);
   b.fail = () => rateLimit(300_000);
-  const pool = createPool({ members: [{ provider: a }, { provider: b }], ...silent });
+  const pool = createPool({
+    members: [
+      { provider: a, label: "CLAUDE_CODE_OAUTH_TOKEN1" },
+      { provider: b, label: "CLAUDE_CODE_OAUTH_TOKEN2" },
+    ],
+    ...silent,
+  });
 
   await assert.rejects(pool.generate(gen("m1"))); // sets both cooldowns
   await assert.rejects(pool.generate(gen("m1")), (err: unknown) => {
     assert.ok(err instanceof CardanError);
     assert.equal(err.code, "rate_limit");
     assert.match(err.message, /all 2 members are cooling down for model "m1"/);
+    assert.doesNotMatch(err.message, /CLAUDE_CODE_OAUTH_TOKEN|member "/);
     assert.ok(err.retryAfterMs! > 0 && err.retryAfterMs! <= 15 * 60 * 1000);
+    return true;
+  });
+});
+
+test("pool: all-cooling error carries resetAt from account-wide cooldown", async () => {
+  const reset = Date.now() + 3_600_000;
+  const a = new Fake();
+  const b = new Fake();
+  a.fail = () => new CardanError("rate_limit", "limited", { resetAt: reset });
+  b.fail = () => new CardanError("rate_limit", "limited", { resetAt: reset });
+  const pool = createPool({ members: [{ provider: a }, { provider: b }], ...silent });
+
+  await assert.rejects(pool.generate(gen("m1"))); // sets both cooldowns
+  await assert.rejects(pool.generate(gen("m1")), (err: unknown) => {
+    assert.ok(err instanceof CardanError);
+    assert.equal(err.code, "rate_limit");
+    assert.equal(err.resetAt, reset);
+    assert.ok(err.retryAfterMs! > 0);
+    assert.doesNotMatch(err.message, /member "/);
     return true;
   });
 });
