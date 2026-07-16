@@ -226,6 +226,8 @@ export type StreamEvent =
       citations?: WebCitation[];
       /** Subscription rate-limit snapshot from the response headers, if reported. */
       rateLimit?: RateLimitStatus;
+      /** Label of the pool member that served the request (pool providers only). */
+      poolMember?: string;
     };
 
 export interface Tool {
@@ -391,6 +393,15 @@ export interface GenerateOptions<S extends SchemaInput = SchemaInput> {
   signal?: AbortSignal;
   /** Override retry behavior; `false` disables retries. */
   retry?: Partial<RetryOptions> | false;
+  /**
+   * Pool-only: label of the preferred pool member for this request (e.g. to
+   * keep a conversation on the account holding its prompt cache). When the
+   * member is ready it serves the request; when it's cooling down, unknown, or
+   * the provider is not a pool, the hint is ignored and normal rotation
+   * applies. The member that actually served is reported back as
+   * {@link GenerateResult.poolMember} / the `finish` event's `poolMember`.
+   */
+  poolMember?: string;
 }
 
 export interface GenerateResult<T = unknown> {
@@ -410,6 +421,8 @@ export interface GenerateResult<T = unknown> {
   citations?: WebCitation[];
   /** Subscription rate-limit snapshot from the response headers, if reported. */
   rateLimit?: RateLimitStatus;
+  /** Label of the pool member that served the request (pool providers only). */
+  poolMember?: string;
   /** Raw provider response body, for debugging/forward-compat. */
   raw: unknown;
 }

@@ -228,6 +228,113 @@ test("pool: an absolute resetAt cools the whole member across models", async () 
   assert.equal(b.served, 3);
 });
 
+test("pool: pins requests to the preferred member and reports it", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  for (let i = 0; i < 3; i++) {
+    const res = await pool.generate({ ...gen("m"), poolMember: "b" });
+    assert.equal(res.poolMember, "b");
+  }
+  assert.equal(a.served, 0);
+  assert.equal(b.served, 3);
+});
+
+test("pool: reports the serving member on unpinned requests too", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  assert.equal((await pool.generate(gen("m"))).poolMember, "a");
+  assert.equal((await pool.generate(gen("m"))).poolMember, "b");
+});
+
+test("pool: pin debt keeps overall usage roughly balanced", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  // Two pinned serves to a (the second displaces b's slot → debt), then four
+  // unpinned requests: the debt hands one of a's rotation slots to b, so six
+  // requests still split 3 / 3.
+  for (let i = 0; i < 2; i++) {
+    await pool.generate({ ...gen("m"), poolMember: "a" });
+  }
+  for (let i = 0; i < 4; i++) await pool.generate(gen("m"));
+  assert.equal(a.served, 3);
+  assert.equal(b.served, 3);
+});
+
+test("pool: a cooling preferred member falls back to rotation", async () => {
+  const a = new Fake();
+  a.fail = () => rateLimit(60_000);
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+    ...silent,
+  });
+  await pool.generate(gen("m")); // a fails and cools; b serves
+  const res = await pool.generate({ ...gen("m"), poolMember: "a" });
+  assert.equal(res.poolMember, "b"); // pin ignored while a is cooling
+  assert.equal(a.attempts, 1);
+});
+
+test("pool: an unknown preferred label is ignored", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  const res = await pool.generate({ ...gen("m"), poolMember: "nope" });
+  assert.equal(res.poolMember, "a"); // normal rotation
+});
+
+test("pool: failover from a pinned member reports the actual server", async () => {
+  const a = new Fake();
+  a.fail = () => rateLimit();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+    ...silent,
+  });
+  const res = await pool.generate({ ...gen("m"), poolMember: "a" });
+  assert.equal(res.poolMember, "b");
+});
+
+test("pool: stream stamps the serving member on the finish event", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  const events: StreamEvent[] = [];
+  for await (const event of pool.stream({ ...gen("m"), poolMember: "b" })) {
+    events.push(event);
+  }
+  const finish = events.find((e) => e.type === "finish");
+  assert.equal(finish?.type === "finish" && finish.poolMember, "b");
+  assert.equal(b.served, 1);
+});
+
+test("pool: strips the pin hint before delegating to the member", async () => {
+  class SpyFake extends Fake {
+    lastOptions: GenerateOptions | undefined;
+    override async generate(options: GenerateOptions): Promise<GenerateResult> {
+      this.lastOptions = options;
+      return super.generate(options);
+    }
+  }
+  const a = new SpyFake();
+  const pool = createPool({ members: [{ provider: a, label: "a" }] });
+  await pool.generate({ ...gen("m"), poolMember: "a" });
+  assert.ok(a.lastOptions);
+  assert.equal("poolMember" in a.lastOptions!, false);
+});
+
 test("pool: fails over on stream before the first event", async () => {
   const a = new Fake();
   a.fail = () => rateLimit();

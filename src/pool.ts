@@ -128,6 +128,14 @@ export function buildRotation(weights: number[]): number[] {
 /** Default cap for retry-after-derived cooldowns. */
 const DEFAULT_MAX_COOLDOWN_MS = 15 * 60 * 1000;
 
+/**
+ * Per weight unit, the max pin debt a member can accumulate (see
+ * {@link PoolProvider} on `poolMember` pinning). Bounds how far pinned traffic
+ * can skew the rotation before repayment stops being tracked — balance is
+ * soft, not absolute.
+ */
+const PIN_DEBT_CAP = 8;
+
 function resolveWeight(weight: number | undefined, label: string): number {
   if (weight === undefined) return 1;
   if (!Number.isInteger(weight) || weight < 1) {
@@ -151,6 +159,16 @@ function resolveWeight(weight: number | undefined, label: string): number {
  * on an all-cooling last-ditch attempt (avoids hanging on a long Retry-After).
  * A single ready member still preserves the caller's retry. For `stream`, a
  * switch is only possible before the first event is yielded.
+ *
+ * A request may pin a member by label via `GenerateOptions.poolMember` (e.g.
+ * to stay on the account holding a conversation's prompt cache). A ready
+ * pinned member serves first (failover order is unchanged after it); a cooling
+ * or unknown label falls back to normal rotation. Pinning that displaces the
+ * rotation's own pick puts *debt* on the pinned member, and unpinned requests
+ * repay it by moving that member to the back of the attempt order until the
+ * debt drains — usage stays roughly balanced without hard guarantees (debt is
+ * capped at {@link PIN_DEBT_CAP} × weight). The member that actually served is
+ * reported on `GenerateResult.poolMember` / the `finish` event.
  */
 export class PoolProvider implements Provider {
   readonly name: string;
@@ -166,6 +184,8 @@ export class PoolProvider implements Provider {
   private readonly cooldowns = new Map<string, number>();
   /** Per-member cooldown deadlines (epoch ms), from an account-wide absolute `resetAt`; keyed by member index. */
   private readonly memberCooldowns = new Map<number, number>();
+  /** Outstanding pinned serves per member index, repaid by unpinned requests. */
+  private readonly pinDebt = new Map<number, number>();
   private cursor = 0;
 
   constructor(options: PoolOptions) {
@@ -200,8 +220,9 @@ export class PoolProvider implements Provider {
     this.shouldFailover = options.shouldFailover ?? defaultShouldFailover;
     this.onFailover = options.onFailover;
     if (this.members.every((m) => typeof m.provider.embed === "function")) {
-      this.embed = (o) =>
-        this.runWithFailover(o, o.model, (p, opts) => p.embed!(opts));
+      this.embed = async (o) =>
+        (await this.runWithFailover(o, o.model, (p, opts) => p.embed!(opts)))
+          .value;
     }
   }
 
@@ -219,15 +240,22 @@ export class PoolProvider implements Provider {
     }));
   }
 
-  generate(options: GenerateOptions): Promise<GenerateResult> {
-    return this.runWithFailover(options, options.model, (provider, opts) =>
-      provider.generate(opts),
+  async generate(options: GenerateOptions): Promise<GenerateResult> {
+    // The pin hint is pool-level; strip it before delegating to the member.
+    const { poolMember: prefer, ...opts } = options;
+    const { value, member } = await this.runWithFailover(
+      opts,
+      options.model,
+      (provider, o) => provider.generate(o),
+      prefer,
     );
+    return { ...value, poolMember: member.label };
   }
 
   async *stream(options: GenerateOptions): AsyncIterable<StreamEvent> {
+    const { poolMember: prefer, ...opts } = options;
     const model = options.model;
-    const { attempts, allCooling } = this.plan(model);
+    const { attempts, allCooling } = this.plan(model, prefer);
     // Disable per-attempt retry when the pool orchestrates failover, or when
     // this is a last-ditch try while every member is already cooling — sitting
     // on a multi-hour subscription Retry-After would hang the request.
@@ -236,10 +264,12 @@ export class PoolProvider implements Provider {
     for (const [i, member] of attempts.entries()) {
       let yielded = false;
       try {
-        const sub = takeover ? { ...options, retry: false as const } : options;
+        const sub = takeover ? { ...opts, retry: false as const } : opts;
         for await (const event of member.provider.stream(sub)) {
           yielded = true;
-          yield event;
+          yield event.type === "finish"
+            ? { ...event, poolMember: member.label }
+            : event;
         }
         return;
       } catch (error) {
@@ -262,7 +292,8 @@ export class PoolProvider implements Provider {
   /**
    * Shared failover loop for unary calls (`generate`, `embed`). Tries members
    * in rotation order, switching on failover-class errors until one succeeds
-   * or the attempts run out.
+   * or the attempts run out. Returns the member that served alongside the
+   * value so callers can report it.
    */
   private async runWithFailover<
     O extends { retry?: Partial<RetryOptions> | false },
@@ -271,17 +302,19 @@ export class PoolProvider implements Provider {
     options: O,
     model: string,
     invoke: (provider: Provider, opts: O) => Promise<R>,
-  ): Promise<R> {
-    const { attempts, allCooling } = this.plan(model);
+    prefer?: string,
+  ): Promise<{ value: R; member: ResolvedMember }> {
+    const { attempts, allCooling } = this.plan(model, prefer);
     // See stream(): also force retry:false on an all-cooling last-ditch try.
     const takeover = attempts.length > 1 || allCooling;
     let lastError: unknown;
     for (const [i, member] of attempts.entries()) {
       try {
-        return await invoke(
+        const value = await invoke(
           member.provider,
           takeover ? { ...options, retry: false } : options,
         );
+        return { value, member };
       } catch (error) {
         lastError = error;
         if (!this.isFailover(error)) throw error;
@@ -300,8 +333,16 @@ export class PoolProvider implements Provider {
    * the ready ones (capped by `maxFailovers + 1`) are returned. If *all* are
    * cooling, returns just the soonest-to-recover member as a last-ditch attempt
    * (`allCooling: true`) — it may have reset early.
+   *
+   * `prefer` pins a member by label: when it's ready it is moved to the front
+   * (recording debt if it displaced the rotation's own pick); a cooling or
+   * unknown label is ignored. Unpinned requests repay outstanding debt by
+   * rotating an indebted front member to the back of the attempt order.
    */
-  private plan(model: string): { attempts: ResolvedMember[]; allCooling: boolean } {
+  private plan(
+    model: string,
+    prefer?: string,
+  ): { attempts: ResolvedMember[]; allCooling: boolean } {
     const start = this.cursor;
     this.cursor = (this.cursor + 1) % this.sequence.length;
     const rotation = [
@@ -320,11 +361,42 @@ export class PoolProvider implements Provider {
       if (until !== undefined) cooling.push({ member, until });
       else ready.push(member);
     }
+    const pinned = prefer === undefined
+      ? undefined
+      : ready.find((m) => m.label === prefer);
+    if (pinned) {
+      if (ready[0] !== pinned) this.recordPinDebt(pinned);
+      const attempts = [pinned, ...ready.filter((m) => m !== pinned)];
+      return { attempts: attempts.slice(0, this.maxFailovers + 1), allCooling: false };
+    }
     if (ready.length > 0) {
+      this.repayPinDebt(ready);
       return { attempts: ready.slice(0, this.maxFailovers + 1), allCooling: false };
     }
     cooling.sort((a, b) => a.until - b.until);
     return { attempts: cooling.slice(0, 1).map((c) => c.member), allCooling: true };
+  }
+
+  /** Charge a pinned serve that displaced the rotation's own pick. */
+  private recordPinDebt(member: ResolvedMember): void {
+    const debt = this.pinDebt.get(member.index) ?? 0;
+    if (debt < member.weight * PIN_DEBT_CAP) {
+      this.pinDebt.set(member.index, debt + 1);
+    }
+  }
+
+  /**
+   * Repay pin debt on an unpinned request: while the member up next carries
+   * debt, decrement it and move the member to the back. Reorder only — an
+   * indebted member stays available for failover, it just loses priority.
+   */
+  private repayPinDebt(ready: ResolvedMember[]): void {
+    while (ready.length > 1) {
+      const debt = this.pinDebt.get(ready[0]!.index) ?? 0;
+      if (debt <= 0) break;
+      this.pinDebt.set(ready[0]!.index, debt - 1);
+      ready.push(ready.shift()!);
+    }
   }
 
   /**

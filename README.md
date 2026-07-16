@@ -262,6 +262,13 @@ await cardan.generate({ model: "openai/gpt-5.6-sol", messages });        // → 
 
 A pool also nests: a `PoolProvider` can itself be a member of another pool (e.g. group several account pools), and the `Conversation`/`Agent` layers accept it wherever they accept a `Cardan` or provider.
 
+A request can pin a member by label with `poolMember` (e.g. to keep a conversation on the account holding its prompt cache). A ready pinned member serves first; a cooling or unknown label falls back to normal rotation. The pool tracks the displacement as per-member debt and repays it on unpinned requests, so usage stays roughly balanced. The member that actually served is reported on `result.poolMember` / the `finish` event:
+
+```ts
+const res = await cardan.generate({ model: "anthropic/claude-opus-4-8", messages, poolMember: sticky });
+sticky = res.poolMember; // re-pin to whoever served (pin may fall back on cooldown/failover)
+```
+
 ### Telemetry
 
 `createCardan({ telemetry: { onRequest } })` observes every logical request at the routing layer — once per `generate` / `stream` / `embed`, after pool failover and per-attempt retries. No call-site instrumentation needed. Absent `telemetry` is a no-op.
