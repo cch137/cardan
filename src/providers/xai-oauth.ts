@@ -25,6 +25,8 @@ import { GroqProvider } from "./groq.js";
  * `anthropic.ts`. Because the proxy uses Chat Completions (not xAI's Responses
  * API that `xai.ts` targets), this reuses the {@link GroqProvider} Chat
  * Completions machinery and only swaps auth, base URL, and the two CLI headers.
+ * The proxy streams reasoning by default as `delta.reasoning_content` (xAI
+ * style; Groq uses `reasoning`) — GroqProvider reads both.
  *
  * cardan stays fetch-only: this takes credentials, it does NOT read
  * `~/.grok/auth.json` itself. Load the token yourself (bin/grok-token.sh, or

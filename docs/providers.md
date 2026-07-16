@@ -59,6 +59,7 @@ prompt caching(唯一需 client 標記的 provider):
 - **版本門檻**:proxy 有最低版本 floor,落後 stable 約 2 個月且移動慢(floor `0.1.202` 於 2026-05-07 發布;預設送的 `0.2.93` 於 2026-07-08)。預設值有 2 個月以上餘裕,配合每月更新一次即可;真 426 時錯誤訊息會提示調 `clientVersion`。
 - **auth 解析**:`~/.grok/auth.json` 結構 `{ "<scope>": { "key": <accessToken>, "refresh_token", "expires_at"(ISO) } }`;`GROK_AUTH_SCOPE` 常數即該 scope key。provider 本身 **fetch-only**——token 由呼叫端傳入 `credentials`。長跑服務用 `loadLocalOAuth` / `localOAuthPool` 讀檔並掛 `onRefresh` 寫回(見 README Local OAuth)。
 - **refresh**:標準 OAuth2 `refresh_token` grant(**form-encoded**,`client_id=grok-cli`,`accounts.x.ai` token endpoint),到期前(`expiresAt`)主動換、401 再換一次;共用單一 round-trip;`onRefresh` 回寫。bare token(無 refresh_token)視為 inference-only,到期於 401 清楚報錯。
+- **reasoning**:proxy 預設就串流推理內容,欄位是 `reasoning_content`(xAI Chat Completions 風格,非 Groq 的 `reasoning`;message 與 delta 皆同,實測 live 驗證),`GroqProvider` 解析兩個欄位皆讀。無需任何 request 欄位開啟;usage 記 `completion_tokens_details.reasoning_tokens`。
 - **錯誤傳遞**:proxy 錯誤回 `{"error":"字串"}`,但 Chat Completions 錯誤路徑只讀 `error.message`(物件)。fetch wrapper 的 `normalizeErrorBody` 把字串型 `error` 正規化成 `{error:{message}}`(非 JSON body 原文透出),確保底層訊息(如 426)到應用層。
 - **env / precedence**:env `GROK_BUILD_OAUTH_TOKEN`(對應 `CLAUDE_CODE_OAUTH_TOKEN`);工廠 `resolveXAI()` 優先序 config `xaiOAuth` > config `xai.apiKey` > env `GROK_BUILD_OAUTH_TOKEN` > env `XAI_API_KEY`,雙 env 皆設時 OAuth 勝出並 `warnOnce`。
 - **ToS**:`X-XAI-Token-Auth: xai-grok-cli` 是明確宣稱「我是官方 CLI」,在 CLI 外用訂閱額度很可能違反 xAI 條款;真 CLI 另送 telemetry/session signal,裸 replay 屬異常流量。風險自負。

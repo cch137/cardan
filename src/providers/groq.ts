@@ -111,6 +111,8 @@ interface ChatUsage {
 interface GroqMessage {
   content?: string | null;
   reasoning?: string | null;
+  /** Grok CLI proxy (XAIOAuthProvider) reasoning field; Groq itself uses `reasoning`. */
+  reasoning_content?: string | null;
   tool_calls?: ChatToolCall[];
   /** Compound systems: per-tool execution records, may carry search results. */
   executed_tools?: unknown[];
@@ -132,6 +134,8 @@ interface ChatStreamChunk {
     delta?: {
       content?: string | null;
       reasoning?: string | null;
+      /** Grok CLI proxy reasoning field; streamed by default on grok models. */
+      reasoning_content?: string | null;
       tool_calls?: Array<ChatToolCall & { index?: number }>;
     };
     message?: GroqMessage;
@@ -410,8 +414,9 @@ export class GroqProvider implements Provider {
     const choice = raw.choices?.[0];
     const message = choice?.message;
     const content: ContentPart[] = [];
-    if (message?.reasoning) {
-      content.push({ type: "thinking", text: message.reasoning });
+    const thinking = message?.reasoning ?? message?.reasoning_content;
+    if (thinking) {
+      content.push({ type: "thinking", text: thinking });
     }
     if (message?.content) {
       content.push({ type: "text", text: message.content });
@@ -500,8 +505,9 @@ export class GroqProvider implements Provider {
       if (!choice) continue;
       if (choice.message) extractGroqCitations(choice.message, citations);
       const delta = choice.delta ?? {};
-      if (delta.reasoning) {
-        yield { type: "thinking_delta", text: delta.reasoning };
+      const thinking = delta.reasoning ?? delta.reasoning_content;
+      if (thinking) {
+        yield { type: "thinking_delta", text: thinking };
       }
       if (delta.content) {
         yield { type: "text_delta", text: delta.content };

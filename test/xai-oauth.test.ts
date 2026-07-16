@@ -249,6 +249,58 @@ test("streaming requests include stream_options.include_usage (proxy sends no us
   });
 });
 
+test("reasoning_content maps to thinking (proxy streams it by default on grok models)", async () => {
+  // Wire shape verified live against cli-chat-proxy.grok.com (grok-4.5).
+  const chunks = [
+    '{"choices":[{"index":0,"delta":{"reasoning_content":"The problem","role":"assistant"}}]}',
+    '{"choices":[{"index":0,"delta":{"reasoning_content":" asks 2+2."}}]}',
+    '{"choices":[{"index":0,"delta":{"content":"4"},"finish_reason":"stop"}]}',
+    "[DONE]",
+  ];
+  const sse = chunks.map((chunk) => `data: ${chunk}\n\n`).join("");
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: routedFetch({ calls: [], onChat: () => new Response(sse, { status: 200 }) }),
+  });
+
+  let thinking = "";
+  let text = "";
+  for await (const event of provider.stream({
+    model: "grok-4.5",
+    messages: [textMessage("user", "hi")],
+  })) {
+    if (event.type === "thinking_delta") thinking += event.text;
+    if (event.type === "text_delta") text += event.text;
+  }
+  assert.equal(thinking, "The problem asks 2+2.");
+  assert.equal(text, "4");
+});
+
+test("non-streaming message.reasoning_content maps to a thinking part", async () => {
+  const provider = new XAIOAuthProvider({
+    credentials: { accessToken: "AT" },
+    fetch: routedFetch({
+      calls: [],
+      onChat: () =>
+        chatResponse(200, {
+          choices: [
+            {
+              message: { content: "4", reasoning_content: "2+2 is 4." },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+    }),
+  });
+  const result = await provider.generate({
+    model: "grok-4.5",
+    messages: [textMessage("user", "hi")],
+  });
+  assert.deepEqual(result.message.content[0], { type: "thinking", text: "2+2 is 4." });
+  assert.equal(result.text, "4");
+});
+
 test("caller-provided stream_options is not overridden", async () => {
   const sse = [
     'data: {"choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}]}\n\n',
