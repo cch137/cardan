@@ -335,6 +335,67 @@ test("pool: strips the pin hint before delegating to the member", async () => {
   assert.equal("poolMember" in a.lastOptions!, false);
 });
 
+test("pool: a disabled member is skipped until re-enabled", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  pool.setDisabledMembers(["a"]);
+  for (let i = 0; i < 4; i++) {
+    assert.equal((await pool.generate(gen("m"))).poolMember, "b");
+  }
+  assert.equal(a.attempts, 0);
+  pool.setDisabledMembers([]);
+  await pool.generate(gen("m"));
+  await pool.generate(gen("m"));
+  assert.equal(a.served, 1); // back in rotation
+});
+
+test("pool: a pin to a disabled member falls back to rotation", async () => {
+  const a = new Fake();
+  const b = new Fake();
+  const pool = createPool({
+    members: [{ provider: a, label: "a" }, { provider: b, label: "b" }],
+  });
+  pool.setDisabledMembers(["a"]);
+  const res = await pool.generate({ ...gen("m"), poolMember: "a" });
+  assert.equal(res.poolMember, "b");
+  assert.equal(a.attempts, 0);
+});
+
+test("pool: disabled members are skipped by failover", async () => {
+  const a = new Fake();
+  a.fail = () => rateLimit();
+  const b = new Fake();
+  const c = new Fake();
+  const pool = createPool({
+    members: [
+      { provider: a, label: "a" },
+      { provider: b, label: "b" },
+      { provider: c, label: "c" },
+    ],
+    ...silent,
+  });
+  pool.setDisabledMembers(["b"]);
+  const res = await pool.generate(gen("m")); // a fails → b skipped → c
+  assert.equal(res.poolMember, "c");
+  assert.equal(b.attempts, 0);
+});
+
+test("pool: rejects with a clear error when every member is disabled", async () => {
+  const a = new Fake();
+  const pool = createPool({ members: [{ provider: a, label: "a" }] });
+  pool.setDisabledMembers(["a"]);
+  await assert.rejects(pool.generate(gen("m")), (err: unknown) => {
+    assert.ok(err instanceof CardanError);
+    assert.equal(err.code, "invalid_request");
+    assert.match(err.message, /all 1 members are disabled/);
+    return true;
+  });
+  assert.equal(a.attempts, 0);
+});
+
 test("pool: fails over on stream before the first event", async () => {
   const a = new Fake();
   a.fail = () => rateLimit();

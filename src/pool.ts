@@ -186,6 +186,8 @@ export class PoolProvider implements Provider {
   private readonly memberCooldowns = new Map<number, number>();
   /** Outstanding pinned serves per member index, repaid by unpinned requests. */
   private readonly pinDebt = new Map<number, number>();
+  /** Administratively disabled member indexes (see {@link setDisabledMembers}). */
+  private readonly disabledMembers = new Set<number>();
   private cursor = 0;
 
   constructor(options: PoolOptions) {
@@ -238,6 +240,21 @@ export class PoolProvider implements Provider {
       label: m.label,
       rateLimit: m.provider.rateLimit,
     }));
+  }
+
+  /**
+   * Replace the set of administratively disabled members, matched by label
+   * (unknown labels are ignored). Disabled members are skipped by selection,
+   * failover, and the all-cooling last-ditch try, and a `poolMember` pin to
+   * one falls back to rotation — until a later call re-enables them. Requests
+   * fail with `invalid_request` when every member is disabled.
+   */
+  setDisabledMembers(labels: Iterable<string>): void {
+    const want = new Set(labels);
+    this.disabledMembers.clear();
+    for (const m of this.members) {
+      if (want.has(m.label)) this.disabledMembers.add(m.index);
+    }
   }
 
   async generate(options: GenerateOptions): Promise<GenerateResult> {
@@ -355,11 +372,19 @@ export class PoolProvider implements Provider {
     for (const idx of rotation) {
       if (seen.has(idx)) continue;
       seen.add(idx);
+      if (this.disabledMembers.has(idx)) continue;
       const member = this.members[idx];
       if (!member) continue;
       const until = this.coolingUntil(idx, model);
       if (until !== undefined) cooling.push({ member, until });
       else ready.push(member);
+    }
+    if (ready.length === 0 && cooling.length === 0) {
+      throw new CardanError(
+        "invalid_request",
+        `pool(${this.name}): all ${this.members.length} members are disabled`,
+        { provider: this.name },
+      );
     }
     const pinned = prefer === undefined
       ? undefined
