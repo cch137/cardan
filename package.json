@@ -74,8 +74,13 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "release": "node bin/publish.mjs",
+    "release": "node ../../scripts/release/publish.mjs",
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "releaseConfig": {
+    "checks": ["typecheck", "test"],
+    "requiredFiles": ["README.md", "LICENSE"],
+    "artifacts": ["dist/index.js", "dist/index.d.ts"]
   },
   "peerDependencies": {
     "zod": "^4.0.0"
