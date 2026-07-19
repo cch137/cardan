@@ -422,6 +422,36 @@ test("pool: rejects with a clear error when every member is disabled", async () 
   assert.equal(a.attempts, 0);
 });
 
+test("pool: clearMemberLimits thaws cooldowns and clears the rate-limit snapshot", async () => {
+  const reset = Date.now() + 60 * 60 * 1000;
+  class SnapshotFake extends Fake {
+    rateLimit: { status: string } | undefined = undefined;
+    clearRateLimit(): void {
+      this.rateLimit = undefined;
+    }
+  }
+  const a = new SnapshotFake();
+  a.fail = () =>
+    new CardanError("rate_limit", "limited", { resetAt: reset, retryAfterMs: 500 });
+  const b = new Fake();
+  const pool = createPool({
+    members: [
+      { provider: a, label: "a" },
+      { provider: b, label: "b" },
+    ],
+    ...silent,
+  });
+
+  await pool.generate(gen("m1")); // a fails (resetAt) → b
+  a.rateLimit = { status: "rejected" };
+  a.fail = () => null; // would succeed if tried
+  assert.equal((await pool.generate(gen("m1"))).poolMember, "b"); // a still cooling
+  assert.equal(pool.clearMemberLimits("a"), true);
+  assert.equal(a.rateLimit, undefined);
+  assert.equal((await pool.generate(gen("m1"))).poolMember, "a"); // thawed
+  assert.equal(pool.clearMemberLimits("missing"), false);
+});
+
 test("pool: fails over on stream before the first event", async () => {
   const a = new Fake();
   a.fail = () => rateLimit();

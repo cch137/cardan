@@ -187,6 +187,11 @@ export class GroqProvider implements Provider {
     return this.lastRateLimit;
   }
 
+  /** Drop the last-known snapshot (admin force-clear of a stale rejected mark). */
+  clearRateLimit(): void {
+    this.lastRateLimit = undefined;
+  }
+
   constructor(options: GroqProviderOptions = {}) {
     this.options = options;
     this.fetch = options.fetch ?? globalThis.fetch;

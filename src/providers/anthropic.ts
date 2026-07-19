@@ -452,6 +452,11 @@ export class AnthropicProvider implements Provider {
     return this.lastRateLimit;
   }
 
+  /** Drop the last-known snapshot (admin force-clear of a stale rejected mark). */
+  clearRateLimit(): void {
+    this.lastRateLimit = undefined;
+  }
+
   constructor(options: AnthropicProviderOptions = {}) {
     this.options = options;
     this.fetch = options.fetch ?? globalThis.fetch;

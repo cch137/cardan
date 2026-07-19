@@ -387,6 +387,12 @@ export class XAIOAuthProvider extends GroqProvider {
     };
   }
 
+  /** Drop throttle + weekly-pool snapshots (admin force-clear). */
+  override clearRateLimit(): void {
+    super.clearRateLimit();
+    this.lastSubscriptionLimit = undefined;
+  }
+
   /**
    * Fetch the SuperGrok weekly usage pool (`GET /v1/billing?format=credits`)
    * and cache it on {@link rateLimit}. Safe to call from ops / admin; not

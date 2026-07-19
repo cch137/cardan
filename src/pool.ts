@@ -257,6 +257,26 @@ export class PoolProvider implements Provider {
     }
   }
 
+  /**
+   * Force-clear a member's cooldowns and last-known rate-limit snapshot so an
+   * admin can re-admit a subscription account marked rejected/exhausted before
+   * its natural reset. Clears the member-wide cooldown, every per-model
+   * cooldown for that member, and calls {@link Provider.clearRateLimit} when
+   * the underlying provider implements it. Unknown labels are no-ops
+   * (`false`). Does not re-enable an administratively disabled member.
+   */
+  clearMemberLimits(label: string): boolean {
+    const member = this.members.find((m) => m.label === label);
+    if (!member) return false;
+    this.memberCooldowns.delete(member.index);
+    const prefix = `${member.index}:`;
+    for (const key of [...this.cooldowns.keys()]) {
+      if (key.startsWith(prefix)) this.cooldowns.delete(key);
+    }
+    member.provider.clearRateLimit?.();
+    return true;
+  }
+
   async generate(options: GenerateOptions): Promise<GenerateResult> {
     // The pin hint is pool-level; strip it before delegating to the member.
     const { poolMember: prefer, ...opts } = options;

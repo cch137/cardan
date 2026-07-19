@@ -503,4 +503,11 @@ export interface Provider {
    * subscription rate-limit headers implement this.
    */
   readonly rateLimit?: RateLimitStatus;
+  /**
+   * Drop the last-known rate-limit snapshot. Optional — only providers that
+   * cache subscription/throttle headers implement this. Used by admin clear
+   * paths (see {@link PoolProvider.clearMemberLimits}) so a stale
+   * rejected/exhausted mark can be force-cleared before its natural reset.
+   */
+  clearRateLimit?(): void;
 }

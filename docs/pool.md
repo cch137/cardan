@@ -7,6 +7,7 @@
 - **輪替**:建構時依 `weight` 產生固定、均勻交錯的 round-robin 序列(`buildRotation`),每次請求取下一格。
 - **pin(`poolMember`)**:請求可用 `GenerateOptions.poolMember` 以 label 指定偏好成員(典型:讓 conversation 黏在持有其 prompt cache 的帳號)。ready 時該成員優先服務;cooling 或 label 不存在則忽略、走正常輪替。pin 若搶走輪替原本要給別人的格子,該成員記一筆**債**,之後的未 pin 請求輪到它時扣債並把它移到嘗試順序尾端(只降優先、不影響 failover 可用性),用量長期保持大致平衡——債有上限(`PIN_DEBT_CAP` × weight),平衡是軟性的。實際服務的成員 label 回報在 `GenerateResult.poolMember` / `finish` 事件的 `poolMember`(未 pin 的請求也回報),呼叫方可據此建立/更新黏著。
 - **執行期停用(`setDisabledMembers`)**:以 label 宣告式替換「管理上停用」的成員集合(未知 label 忽略)。停用成員被選擇、failover、全冷卻 last-ditch 一律跳過,pin 到停用成員退回輪替;再呼叫一次即重新啟用。全部成員停用時請求拋 `invalid_request`。典型:管理後台的帳號開關,設定變更時整組重套。
+- **強制解凍(`clearMemberLimits`)**:以 label 清掉該成員的帳號級/per-model 冷卻,並呼叫底層 `Provider.clearRateLimit`(若有)丟棄 last-known rate-limit 快照。用於管理後台手動移除 `rejected`/`exhausted` 限制;未知 label 回 `false`。不影響 admin 停用狀態。
 - **failover**:對 `rate_limit | auth | server | network | timeout` 切到下一個**相異**成員重試;池擁有這層跨帳號重試,故嘗試 ≥2 成員時關閉底層 per-attempt retry(只剩一個可試、且非「全部冷卻最後一搏」時保留呼叫方 retry)。全部冷卻的 last-ditch 也關 per-attempt retry,避免長 `Retry-After` 掛住請求。`stream` 只在第一個事件吐出前能切。`maxFailovers` 封頂切換次數,`shouldFailover` 可自訂。
 - **cooldown(雙層,依訊號範圍)**:成員失敗後在到期前被後續請求跳過,到期由路由自然刪除解凍,無背景 timer。範圍取決於錯誤訊號:
   - **帳號級**(`resetAt`):絕對 epoch ms、provider 自報精確重置(如訂閱窗口,跨所有 model)→ 冷卻**整個 member**(`memberCooldowns` 以 member index 為 key),所有 model 都跳過,**照值採用、不封頂**。
@@ -15,4 +16,4 @@
   - 兩層並存:`coolingUntil` 取兩者中**較晚**的有效到期值判定,純同步、每成員一次 map 查詢、無背景狀態。
 - **全部冷卻**:該 model 下所有成員都在冷卻 → 試「最快恢復」的那個作最後一搏(可能已提早重置),仍失敗拋 `rate_limit` `CardanError`(訊息含成員數與最快恢復時間;`retryAfterMs` 與 `resetAt` 設為最快恢復;訊息**不含** member label,避免內部代號外洩)。`code` 沿用 `rate_limit`,不新增 `ErrorCode`。
 - **不做主動探測 / 預先冷卻**:pool 不持 timer、不主動回查配額、無 usage-aware hook/`onError`。精確 reset 搭在 429 回應上(見 [providers.md#anthropic](./providers.md#anthropic)),到期自然解凍;主動回查 header 還得發真實請求,對 cooling 帳號正是要避免的。早期曾設計 `/api/oauth/usage` 背景探測,因需 `user:profile` scope(inference-only token 403)且需發請求而棄用。
-- **`rateLimits()`(純觀測)**:回傳每成員 `{ label, rateLimit }`(各 provider 最後已知額度快照,見 [providers.md#anthropic](./providers.md#anthropic))。pool 刻意**不**據此避讓——仍有額度的成員提前冷卻會浪費配額,與「只在真實錯誤訊號才冷卻」衝突;要不要調權重/降速由呼叫方決定。
+- **`rateLimits()`(純觀測)**:回傳每成員 `{ label, rateLimit }`(各 provider 最後已知額度快照,見 [providers.md#anthropic](./providers.md#anthropic))。pool 刻意**不**據此避讓——仍有額度的成員提前冷卻會浪費配額,與「只在真實錯誤訊號才冷卻」衝突;要不要調權重/降速由呼叫方決定。管理端可用 `clearMemberLimits` 丟棄某成員快照並同步解凍。
