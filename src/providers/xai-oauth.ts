@@ -40,10 +40,16 @@ import { GroqProvider } from "./groq.js";
 
 /** Default proxy base; the Groq machinery appends `/v1/chat/completions`. */
 const DEFAULT_PROXY_BASE = "https://cli-chat-proxy.grok.com";
-/** OAuth token endpoint for the refresh grant (`accounts.x.ai`). */
-const DEFAULT_TOKEN_URL = "https://accounts.x.ai/oauth2/token";
-/** The Grok CLI's public OAuth client id. */
-const DEFAULT_CLIENT_ID = "grok-cli";
+/**
+ * Production xAI OAuth2 issuer. The refresh token endpoint is resolved from its
+ * OIDC discovery document (`{issuer}/.well-known/openid-configuration`) — the
+ * same mechanism the Grok CLI uses — so an endpoint move needs no code change.
+ * `accounts.x.ai` (the browser consent app) is NOT the token host: POSTing a
+ * refresh there returns the app's HTML, i.e. the "non-JSON response" failure.
+ */
+const DEFAULT_ISSUER = "https://auth.x.ai";
+/** The Grok CLI's public OAuth client id (public client — no secret). */
+const DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 /** Header that tells the proxy to validate the bearer as a CLI session token. */
 const TOKEN_AUTH_HEADER = "x-xai-token-auth";
 const TOKEN_AUTH_VALUE = "xai-grok-cli";
@@ -65,7 +71,8 @@ const DEFAULT_CLIENT_SURFACE = "grok-shell";
 /**
  * The `~/.grok/auth.json` scope key under which `grok login` stores the OIDC
  * session token: `{ "<scope>": { "key": <accessToken>, "refresh_token": ... } }`.
- * The `::` suffix is the audience UUID; override if yours differs.
+ * The scope is `{issuer}::{client_id}`; the `::` suffix is the OAuth client id
+ * (not an audience). Override the parts via `issuer` / `clientId` if yours differ.
  */
 export const GROK_AUTH_SCOPE =
   "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
@@ -146,10 +153,23 @@ export interface XAIOAuthProviderOptions {
     | XAIOAuthCredentials
     | undefined
     | Promise<XAIOAuthCredentials | undefined>;
-  /** Override the OAuth token endpoint (default `accounts.x.ai/oauth2/token`). */
+  /**
+   * OAuth2/OIDC issuer whose token endpoint is resolved via discovery
+   * (default `https://auth.x.ai`). Ignored when {@link tokenUrl} is set. For a
+   * Grok credential this is the file's `oidc_issuer`.
+   */
+  issuer?: string;
+  /** Skip discovery and POST the refresh grant to this token endpoint directly. */
   tokenUrl?: string;
-  /** Override the OAuth client id (default `grok-cli`). */
+  /**
+   * OAuth client id for the refresh grant (default the Grok CLI public client).
+   * For a Grok credential this is the file's `oidc_client_id`.
+   */
   clientId?: string;
+  /** Team-login principal type, forwarded on refresh when set (personal = omit). */
+  principalType?: string;
+  /** Team-login principal id, forwarded on refresh when set (personal = omit). */
+  principalId?: string;
   /** Override the proxy base URL (default `cli-chat-proxy.grok.com`). */
   baseUrl?: string;
   /**
@@ -199,25 +219,40 @@ class GrokOAuth extends OAuthTokenManager<XAIOAuthCredentials> {
   protected async fetchRefreshedCredentials(
     refreshToken: string,
   ): Promise<Required<XAIOAuthCredentials>> {
+    // Resolve the token endpoint by OIDC discovery on the issuer (unless an
+    // explicit `tokenUrl` is given) — the Grok CLI does the same, so an
+    // endpoint move is handled without a code change. Uses the raw fetch
+    // (`fetchImpl`), not the bearer-injecting one: discovery is unauthenticated.
+    const tokenUrl = this.opts.tokenUrl ??
+      (await discoverTokenEndpoint(this.opts.issuer ?? DEFAULT_ISSUER, this.fetchImpl));
+    const params = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: this.opts.clientId ?? DEFAULT_CLIENT_ID,
+    });
+    // Forwarded only for team logins; omit for personal SuperGrok credentials.
+    if (this.opts.principalType) params.set("principal_type", this.opts.principalType);
+    if (this.opts.principalId) params.set("principal_id", this.opts.principalId);
     let res: Response;
     try {
       // Standard OAuth2 token endpoint: form-encoded, unlike Anthropic's JSON.
-      res = await this.fetchImpl(this.opts.tokenUrl ?? DEFAULT_TOKEN_URL, {
+      res = await this.fetchImpl(tokenUrl, {
         method: "POST",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: refreshToken,
-          client_id: this.opts.clientId ?? DEFAULT_CLIENT_ID,
-        }).toString(),
+        body: params.toString(),
       });
     } catch (error) {
       throw wrapFetchError(error, "xai-oauth");
     }
     if (!res.ok) {
+      // Surface the OAuth2 `error` code so `invalid_grant` (refresh token
+      // rotated out / revoked — re-login) is distinguishable from a transient
+      // failure. The token/refresh-token themselves never enter the message.
+      const code = await oauthErrorCode(res);
       throw new CardanError(
         "auth",
-        `xai oauth: token refresh failed (HTTP ${res.status}); re-run \`grok login\``,
+        `xai oauth: token refresh failed (HTTP ${res.status}${code ? `, ${code}` : ""}); ` +
+          "re-run `grok login`",
         { provider: "xai-oauth", status: res.status },
       );
     }
@@ -230,7 +265,8 @@ class GrokOAuth extends OAuthTokenManager<XAIOAuthCredentials> {
     try {
       data = (await res.json()) as typeof data;
     } catch {
-      // accounts.x.ai intermittently serves an HTML challenge page with a 200.
+      // Defensive: a token endpoint serving an HTML error/challenge with a 200
+      // would otherwise blow up JSON parsing with an opaque message.
       throw new CardanError(
         "server",
         "xai oauth: token endpoint returned non-JSON response",
@@ -245,6 +281,8 @@ class GrokOAuth extends OAuthTokenManager<XAIOAuthCredentials> {
     }
     return {
       accessToken,
+      // The IdP may omit the refresh token when it does not rotate it — keep
+      // the current one so the session survives (matches the Grok CLI).
       refreshToken: data.refresh_token ?? refreshToken,
       expiresAt:
         typeof data.expires_in === "number" ? Date.now() + data.expires_in * 1000 : null,
@@ -325,6 +363,62 @@ function modelFromBody(body: unknown): string | undefined {
   try {
     const model = (JSON.parse(body) as { model?: unknown }).model;
     return typeof model === "string" ? model : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve an OAuth2 issuer's token endpoint from its OIDC discovery document
+ * (`{issuer}/.well-known/openid-configuration`) — unauthenticated GET, bounded
+ * to 10s. On any failure (network, timeout, non-2xx, missing/non-string
+ * `token_endpoint`) it derives the standard `{issuer}/oauth2/token` so a
+ * discovery outage never blocks (or stalls) a refresh — exact for `auth.x.ai`,
+ * best-effort for custom IdPs. Not cached: refresh (the only caller) runs about
+ * hourly.
+ */
+async function discoverTokenEndpoint(
+  issuer: string,
+  fetchImpl: typeof globalThis.fetch,
+): Promise<string> {
+  const base = issuer.replace(/\/+$/, "");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const res = await fetchImpl(`${base}/.well-known/openid-configuration`, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (res.ok) {
+      const doc = (await res.json()) as { token_endpoint?: unknown };
+      if (typeof doc.token_endpoint === "string" && doc.token_endpoint) {
+        return doc.token_endpoint;
+      }
+    }
+  } catch {
+    // Network / timeout / parse failure — fall through to the derived endpoint.
+  } finally {
+    clearTimeout(timer);
+  }
+  return `${base}/oauth2/token`;
+}
+
+/**
+ * The OAuth2 `error` code from a non-OK token response, or undefined. Reads the
+ * body (consumed on the error path only); returns the short code (e.g.
+ * `invalid_grant`) — never token material or a free-form body.
+ */
+async function oauthErrorCode(res: Response): Promise<string | undefined> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    return undefined;
+  }
+  try {
+    const error = (JSON.parse(text) as { error?: unknown }).error;
+    return typeof error === "string" && error ? error : undefined;
   } catch {
     return undefined;
   }

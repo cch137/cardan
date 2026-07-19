@@ -39,6 +39,8 @@ const grokFile = JSON.stringify({
     first_name: "chee",
     refresh_token: "grok-refresh",
     expires_at: new Date(NOW + 7_200_000).toISOString(),
+    oidc_issuer: "https://auth.x.ai",
+    oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
   },
 });
 
@@ -99,6 +101,8 @@ test("extractXAI: matches on value shape, not the scope key", () => {
   assert.equal(cred.accessToken, "eyJ0.grok.token");
   assert.equal(cred.refreshToken, "grok-refresh");
   assert.equal(cred.expiresAt, NOW + 7_200_000);
+  assert.equal(cred.oidcIssuer, "https://auth.x.ai");
+  assert.equal(cred.oidcClientId, "b1a00492-073a-47ea-816f-4c329264a828");
   assert.deepEqual(cred.info, [["account", "chee <user@example.com>"]]);
 
   const renamed = extractXAI({ "totally::different::scope": { key: "tok2" } });
@@ -111,6 +115,39 @@ test("extractXAI: several entries — keeps the one expiring last", () => {
     new: { key: "fresh", expires_at: new Date(NOW + 1000).toISOString() },
   });
   assert.equal(cred?.accessToken, "fresh");
+});
+
+test("extractXAI: skips api_key/web_login scopes, prefers the refreshable session", () => {
+  const cred = extractXAI({
+    "xai::api_key": { key: "xai-APIKEY", auth_mode: "api_key" },
+    "https://accounts.x.ai/sign-in": {
+      key: "legacy",
+      auth_mode: "web_login",
+      refresh_token: "legacy-rt",
+    },
+    "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+      key: "session",
+      auth_mode: "oidc",
+      refresh_token: "rt",
+      expires_at: new Date(NOW + 3_600_000).toISOString(),
+      oidc_issuer: "https://auth.x.ai",
+      oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+    },
+  });
+  assert.equal(cred?.accessToken, "session");
+  assert.equal(cred?.refreshToken, "rt");
+});
+
+test("extractXAI: prefers a refreshable entry over a later-expiring bare one", () => {
+  const cred = extractXAI({
+    bare: { key: "bare", expires_at: new Date(NOW + 10_000_000).toISOString() },
+    session: {
+      key: "session",
+      refresh_token: "rt",
+      expires_at: new Date(NOW + 1000).toISOString(),
+    },
+  });
+  assert.equal(cred?.accessToken, "session");
 });
 
 test("extractXAI: rejects non-credential shapes", () => {

@@ -303,6 +303,12 @@ test("file member: adopts external rotation via reload; write-back still matches
     const headers = new Headers(init?.headers);
     const auth = headers.get("authorization") ?? "";
     calls.push({ url, auth, body: String(init?.body ?? "") });
+    if (url.includes("/.well-known/openid-configuration")) {
+      return new Response(JSON.stringify({ token_endpoint: "https://auth.x.ai/oauth2/token" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (url.includes("/oauth2/token")) {
       return new Response(
         JSON.stringify({ access_token: "net-new", refresh_token: "net-refresh", expires_in: 3600 }),

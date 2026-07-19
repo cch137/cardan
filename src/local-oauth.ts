@@ -378,6 +378,10 @@ function memberFromFile(
       credentials,
       onRefresh,
       reload,
+      // Refresh against the issuer/client the credential was minted with
+      // (enterprise IdPs, future client rotations); defaults cover `grok login`.
+      ...(cred.oidcIssuer ? { issuer: cred.oidcIssuer } : {}),
+      ...(cred.oidcClientId ? { clientId: cred.oidcClientId } : {}),
     }),
   };
 }

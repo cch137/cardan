@@ -34,6 +34,10 @@ export interface DetectedCredential {
   expiresAt?: number;
   /** Epoch ms expiry of the refresh token, when the file reports one. */
   refreshExpiresAt?: number;
+  /** OIDC issuer that minted the credential (drives Grok refresh discovery). */
+  oidcIssuer?: string;
+  /** OIDC client id the credential was obtained with (needed for Grok refresh). */
+  oidcClientId?: string;
   /** Provider-specific display rows (label, value), e.g. subscription tier. */
   info: Array<[string, string]>;
 }
@@ -106,33 +110,58 @@ export function extractAnthropic(json: unknown): DetectedCredential | undefined 
 
 /**
  * The Grok CLI stores `{ "<scope>": { key, refresh_token, expires_at, email,
- * first_name, ... } }` where `<scope>` embeds an audience UUID that can change,
- * so scan values for an object with a string `key`. If several entries match,
- * keep the one expiring last (unknown expiry counts as freshest).
+ * first_name, oidc_issuer, oidc_client_id, auth_mode, ... } }` where `<scope>`
+ * is `{issuer}::{client_id}` and can change, so scan values for an object with a
+ * string `key`.
+ *
+ * `auth.json` can hold several scopes at once: the OIDC session, the
+ * pay-per-token `xai::api_key` entry (`auth_mode:"api_key"`, no refresh token),
+ * and deprecated `web_login` tokens. Only the OIDC session is a usable,
+ * refreshable proxy credential, so skip the other two and, among the rest,
+ * prefer an entry that carries a refresh token (it self-heals on expiry), then
+ * the one expiring last (unknown expiry counts as freshest).
  */
 export function extractXAI(json: unknown): DetectedCredential | undefined {
   if (!isObject(json)) return undefined;
-  let best: { cred: DetectedCredential; expiresAt: number } | undefined;
+  let best: { cred: DetectedCredential; refreshable: number; expiresAt: number } | undefined;
   for (const entry of Object.values(json)) {
     if (!isObject(entry)) continue;
     const token = entry.key;
     if (typeof token !== "string" || !token) continue;
+    const authMode = typeof entry.auth_mode === "string" ? entry.auth_mode : "";
+    if (authMode === "api_key" || authMode === "web_login") continue;
     const info: Array<[string, string]> = [];
     const name = typeof entry.first_name === "string" ? entry.first_name : "";
     const email = typeof entry.email === "string" ? entry.email : "";
     const account = [name, email && `<${email}>`].filter(Boolean).join(" ");
     if (account) info.push(["account", account]);
+    const refreshToken =
+      typeof entry.refresh_token === "string" && entry.refresh_token
+        ? entry.refresh_token
+        : undefined;
     const cred: DetectedCredential = {
       accessToken: token,
-      refreshToken:
-        typeof entry.refresh_token === "string" && entry.refresh_token
-          ? entry.refresh_token
-          : undefined,
+      refreshToken,
       expiresAt: epochMs(entry.expires_at),
+      oidcIssuer:
+        typeof entry.oidc_issuer === "string" && entry.oidc_issuer
+          ? entry.oidc_issuer
+          : undefined,
+      oidcClientId:
+        typeof entry.oidc_client_id === "string" && entry.oidc_client_id
+          ? entry.oidc_client_id
+          : undefined,
       info,
     };
+    const refreshable = refreshToken ? 1 : 0;
     const exp = cred.expiresAt ?? Infinity;
-    if (!best || exp > best.expiresAt) best = { cred, expiresAt: exp };
+    if (
+      !best ||
+      refreshable > best.refreshable ||
+      (refreshable === best.refreshable && exp > best.expiresAt)
+    ) {
+      best = { cred, refreshable, expiresAt: exp };
+    }
   }
   return best?.cred;
 }
