@@ -70,6 +70,19 @@ const DEFAULT_API_VERSION = "v1beta";
 /** Models that take `thinkingLevel` (Gemini 3+); older ones take `thinkingBudget`. */
 const THINKING_LEVEL_MODELS = /^gemini-(?:[3-9]|\d{2})/;
 
+/** Models that enforce a `thoughtSignature` on every replayed functionCall (Gemini 3+). */
+const SIGNED_TOOL_CALL_MODELS = /^gemini-(?:[3-9]|\d{2})/;
+
+/**
+ * Sentinel accepted by Gemini 3+ to skip `thoughtSignature` validation on
+ * functionCall parts that never carried a real signature — e.g. tool calls
+ * replayed from another provider or from a Gemini turn that emitted parallel
+ * calls (only the first is signed). Documented last resort; keeps the native
+ * functionCall structure instead of dropping or downgrading it. See
+ * https://ai.google.dev/gemini-api/docs/thought-signatures
+ */
+const UNSIGNED_TOOL_CALL_SIGNATURE = "skip_thought_signature_validator";
+
 /** Pre-2.0 models use the legacy `google_search_retrieval` grounding tool. */
 const SEARCH_RETRIEVAL_MODELS = /^gemini-1\./;
 
@@ -311,9 +324,12 @@ export class GoogleProvider implements Provider {
       normalizeMessages(options.messages),
     );
     const callNames = collectCallNames(messages);
+    const signTools = SIGNED_TOOL_CALL_MODELS.test(
+      stripModelsPrefix(options.model),
+    );
 
     const body: Record<string, unknown> = {
-      contents: convertMessages(messages, callNames),
+      contents: convertMessages(messages, callNames, signTools),
     };
     if (system) body.systemInstruction = { parts: [{ text: system }] };
 
@@ -541,12 +557,13 @@ function collectCallNames(messages: Message[]): Map<string, string> {
 function convertMessages(
   messages: Message[],
   callNames: Map<string, string>,
+  signTools: boolean,
 ): Array<Record<string, unknown>> {
   const contents: Array<{ role: string; parts: unknown[] }> = [];
   for (const message of messages) {
     const role = message.role === "assistant" ? "model" : "user";
     const parts = message.content
-      .map((part) => convertRequestPart(part, callNames))
+      .map((part) => convertRequestPart(part, callNames, signTools))
       .filter((part) => part !== null);
     if (parts.length === 0) continue;
     const last = contents[contents.length - 1];
@@ -562,6 +579,7 @@ function convertMessages(
 function convertRequestPart(
   part: ContentPart,
   callNames: Map<string, string>,
+  signTools: boolean,
 ): Record<string, unknown> | null {
   switch (part.type) {
     case "text":
@@ -578,15 +596,21 @@ function convertRequestPart(
               data: bytesToBase64(part.data),
             },
           };
-    case "tool_call":
+    case "tool_call": {
+      // Gemini 3+ rejects functionCall parts with no thoughtSignature; when a
+      // call carries none (foreign provider, unsigned parallel sibling) fall
+      // back to the documented sentinel so replay is accepted without loss.
+      const signature =
+        part.signature || (signTools ? UNSIGNED_TOOL_CALL_SIGNATURE : undefined);
       return {
         functionCall: {
           ...(isSyntheticCallId(part.id) ? {} : { id: part.id }),
           name: part.name,
           args: part.args ?? {},
         },
-        ...(part.signature ? { thoughtSignature: part.signature } : {}),
+        ...(signature ? { thoughtSignature: signature } : {}),
       };
+    }
     case "tool_result":
       return {
         functionResponse: {

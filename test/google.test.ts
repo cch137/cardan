@@ -147,7 +147,10 @@ test("replays tool calls: synthetic ids stripped, real ids and signatures kept",
     ["user", "model", "user"],
   );
   assert.deepEqual(contents[1]!.parts, [
-    { functionCall: { name: "f", args: { x: 1 } } },
+    {
+      functionCall: { name: "f", args: { x: 1 } },
+      thoughtSignature: "skip_thought_signature_validator",
+    },
     { functionCall: { id: "fc_real", name: "g", args: { y: 2 } }, thoughtSignature: "sig1" },
   ]);
   // non-object results wrapped; name resolved from the matching tool_call
@@ -155,6 +158,45 @@ test("replays tool calls: synthetic ids stripped, real ids and signatures kept",
     { functionResponse: { name: "f", response: { result: "plain text" } } },
     { functionResponse: { id: "fc_real", name: "g", response: { ok: true } } },
   ]);
+});
+
+test("unsigned tool calls: sentinel injected for Gemini 3+, omitted for older models", async () => {
+  const captured: Captured[] = [];
+  const provider = new GoogleProvider({
+    apiKey: "g-test",
+    fetch: mockFetch(
+      [() => jsonResponse(RESPONSE_FIXTURE), () => jsonResponse(RESPONSE_FIXTURE)],
+      captured,
+    ),
+  });
+
+  // history carried over from another provider: tool call has no signature
+  const messages: Message[] = [
+    textMessage("user", "q"),
+    {
+      role: "assistant",
+      content: [{ type: "tool_call", id: "cardan_call_1", name: "f", args: { x: 1 } }],
+    },
+    {
+      role: "tool",
+      content: [{ type: "tool_result", callId: "cardan_call_1", result: "ok" }],
+    },
+  ];
+
+  await provider.generate({ model: "gemini-3.5-flash", messages });
+  await provider.generate({ model: "gemini-2.5-flash", messages });
+
+  const gemini3 = captured[0]!.body.contents as Array<{ parts: unknown[] }>;
+  const gemini25 = captured[1]!.body.contents as Array<{ parts: unknown[] }>;
+  // Gemini 3+ enforces the signature; the documented sentinel skips validation
+  assert.deepEqual(gemini3[1]!.parts, [
+    {
+      functionCall: { name: "f", args: { x: 1 } },
+      thoughtSignature: "skip_thought_signature_validator",
+    },
+  ]);
+  // Gemini 2.x neither requires nor validates it, so no sentinel is injected
+  assert.deepEqual(gemini25[1]!.parts, [{ functionCall: { name: "f", args: { x: 1 } } }]);
 });
 
 test("tool errors and signed text/thinking parts convert correctly", async () => {
@@ -191,7 +233,10 @@ test("tool errors and signed text/thinking parts convert correctly", async () =>
   assert.deepEqual(contents[1]!.parts, [
     { text: "signed", thought: true, thoughtSignature: "tsig" },
     { text: "answer", thoughtSignature: "textsig" },
-    { functionCall: { name: "f", args: {} } },
+    {
+      functionCall: { name: "f", args: {} },
+      thoughtSignature: "skip_thought_signature_validator",
+    },
   ]);
   assert.deepEqual(contents[2]!.parts, [
     { functionResponse: { name: "f", response: { error: '{"a":1}' } } },
