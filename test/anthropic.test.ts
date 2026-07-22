@@ -815,7 +815,7 @@ test("stream: surfaces rate-limit headers on the finish event", async () => {
   assert.equal(result.rateLimit?.resetAt, 1781781600 * 1000);
 });
 
-test("provider.rateLimit exposes the last-known snapshot (overwritten, not accumulated)", async () => {
+test("provider.rateLimit exposes the last-known snapshot", async () => {
   const provider = new AnthropicProvider({
     apiKey: "sk-test",
     fetch: mockFetch([() => jsonResponse(RESPONSE_FIXTURE, 200, RATELIMIT_HEADERS)]),
@@ -827,6 +827,28 @@ test("provider.rateLimit exposes the last-known snapshot (overwritten, not accum
   assert.ok(after, "rateLimit snapshot set after a request");
   assert.equal(after.fiveHour?.utilization, 0.93);
   assert.equal(after.resetAt, 1781781600 * 1000);
+});
+
+test("provider.rateLimit: a windowless overage reply keeps the prior windows", async () => {
+  // A `representative: "overage"` response omits the 5h/7d window headers; the
+  // missing windows mean "unknown", so the last known windows must survive.
+  const overageHeaders: Record<string, string> = {
+    "anthropic-ratelimit-unified-status": "allowed",
+    "anthropic-ratelimit-unified-representative-claim": "overage",
+  };
+  const provider = new AnthropicProvider({
+    apiKey: "sk-test",
+    fetch: mockFetch([
+      () => jsonResponse(RESPONSE_FIXTURE, 200, RATELIMIT_HEADERS),
+      () => jsonResponse(RESPONSE_FIXTURE, 200, overageHeaders),
+    ]),
+  });
+  await provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "q")] });
+  await provider.generate({ model: "claude-opus-4-8", messages: [textMessage("user", "q")] });
+  const after = provider.rateLimit;
+  assert.equal(after?.representative, "overage"); // updated field wins
+  assert.equal(after?.fiveHour?.utilization, 0.93); // prior window preserved
+  assert.equal(after?.sevenDay?.utilization, 0.67);
 });
 
 test("cache: places cache_control on last system block and last message", async () => {

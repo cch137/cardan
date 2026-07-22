@@ -443,10 +443,13 @@ export class AnthropicProvider implements Provider {
   private lastRateLimit?: RateLimitStatus;
 
   /**
-   * The subscription rate-limit snapshot from the most recent response that
-   * carried the unified headers (OAuth/subscription requests), or `undefined`
-   * if none has been seen yet. A last-known view, overwritten on each such
-   * response — not an accumulator. Read it any time to check remaining quota.
+   * The subscription rate-limit snapshot from responses that carried the
+   * unified headers (OAuth/subscription requests), or `undefined` if none has
+   * been seen yet. A per-field last-known view: each response updates the fields
+   * it reports and leaves the rest intact. This matters because some responses
+   * carry only a partial header set — e.g. a `representative: "overage"` reply
+   * omits the `5h`/`7d` window headers — and a missing field means "unknown",
+   * not "reset to zero", so the prior window snapshot must survive it.
    */
   get rateLimit(): RateLimitStatus | undefined {
     return this.lastRateLimit;
@@ -455,6 +458,18 @@ export class AnthropicProvider implements Provider {
   /** Drop the last-known snapshot (admin force-clear of a stale rejected mark). */
   clearRateLimit(): void {
     this.lastRateLimit = undefined;
+  }
+
+  /**
+   * Merge a freshly parsed snapshot into the last-known one, preserving fields
+   * the new snapshot omits. A partial header set (missing `5h`/`7d` windows)
+   * reports "unknown" for those windows, so keeping the prior values is correct
+   * — replacing wholesale would erase live quota data on every overage reply.
+   */
+  private recordRateLimit(next: RateLimitStatus): void {
+    this.lastRateLimit = this.lastRateLimit
+      ? { ...this.lastRateLimit, ...next }
+      : next;
   }
 
   constructor(options: AnthropicProviderOptions = {}) {
@@ -518,7 +533,7 @@ export class AnthropicProvider implements Provider {
         options.signal,
       );
       rateLimit = parseRateLimit(response.headers) ?? rateLimit;
-      if (rateLimit) this.lastRateLimit = rateLimit;
+      if (rateLimit) this.recordRateLimit(rateLimit);
       const raw = (await response.json()) as AnthropicMessageResponse;
       lastRaw = raw;
       for (const block of raw.content ?? []) {
@@ -569,7 +584,7 @@ export class AnthropicProvider implements Provider {
         options.signal,
       );
       rateLimit = parseRateLimit(response.headers) ?? rateLimit;
-      if (rateLimit) this.lastRateLimit = rateLimit;
+      if (rateLimit) this.recordRateLimit(rateLimit);
       if (!response.body) {
         throw new CardanError("network", "response has no body", {
           provider: this.name,
@@ -720,12 +735,12 @@ export class AnthropicProvider implements Provider {
       ) {
         rateLimit.status = "exhausted";
       }
-      this.lastRateLimit = rateLimit;
+      this.recordRateLimit(rateLimit);
     } else if (subscriptionQuota) {
-      this.lastRateLimit = {
+      this.recordRateLimit({
         status: "exhausted",
         ...(resetAt !== undefined ? { resetAt } : {}),
-      };
+      });
     }
     return new CardanError(code, message, {
       provider: this.name,
