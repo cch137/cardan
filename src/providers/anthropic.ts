@@ -144,6 +144,21 @@ const DEFAULT_BASE_URL = "https://api.anthropic.com";
 const DEFAULT_VERSION = "2023-06-01";
 const DEFAULT_MAX_OUTPUT_TOKENS = 16000;
 
+/**
+ * Per-family default `max_tokens` when the caller omits `maxOutputTokens`.
+ * Fable / Opus / Sonnet cap at 128k output tokens, Haiku at 64k; unrecognized
+ * models fall back to {@link DEFAULT_MAX_OUTPUT_TOKENS}. A coarse family gate
+ * (matches every version), so new releases in these lines need no edit.
+ */
+const MAX_OUTPUT_TOKENS_128K = /^claude-(?:fable|opus|sonnet)-/;
+const MAX_OUTPUT_TOKENS_64K = /^claude-haiku-/;
+
+function defaultMaxOutputTokens(model: string): number {
+  if (MAX_OUTPUT_TOKENS_128K.test(model)) return 128000;
+  if (MAX_OUTPUT_TOKENS_64K.test(model)) return 64000;
+  return DEFAULT_MAX_OUTPUT_TOKENS;
+}
+
 // OAuth (Claude.ai subscription) auth. A subscription token is only accepted on
 // /v1/messages when the request looks like Claude Code — all three are required:
 //   (1) Bearer auth (not x-api-key),
@@ -764,7 +779,7 @@ export class AnthropicProvider implements Provider {
 
     const body: Record<string, unknown> = {
       model: options.model,
-      max_tokens: options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+      max_tokens: options.maxOutputTokens ?? defaultMaxOutputTokens(options.model),
       // Keep an assistant turn's thinking blocks only while a client tool call
       // is still in flight (the turn is immediately followed by tool results),
       // where Anthropic requires them; drop them from completed turns — see
@@ -876,7 +891,7 @@ export class AnthropicProvider implements Provider {
       } else {
         // Older models reject adaptive thinking and the effort parameter; map
         // effort to a token budget and clamp within the response's max_tokens.
-        const maxTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+        const maxTokens = options.maxOutputTokens ?? defaultMaxOutputTokens(options.model);
         const budget = Math.min(
           Math.max(THINKING_BUDGETS[options.reasoning.effort ?? "medium"], 1024),
           maxTokens - 1,

@@ -87,7 +87,7 @@ test("builds request: system hoist, tool results, defaults, headers", async () =
 
   const body = request.body;
   assert.equal(body.system, "be terse");
-  assert.equal(body.max_tokens, 16000);
+  assert.equal(body.max_tokens, 64000);
   assert.equal(body.temperature, 0.5);
   assert.deepEqual(body.tool_choice, { type: "any" });
   assert.deepEqual(body.tools, [
